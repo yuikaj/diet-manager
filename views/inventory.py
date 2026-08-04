@@ -3,8 +3,9 @@ import os
 import re
 
 import streamlit as st
-from db.inventory import (
-    get_all_inventory, toggle_in_stock, set_quantity, add_item, delete_item,
+from utils.cache import (
+    get_all_inventory_cached as get_all_inventory,
+    toggle_in_stock, set_quantity, add_item, delete_item,
     toggle_perishable,
 )
 
@@ -103,12 +104,19 @@ def _render_portion_item(item: dict, shopping_mode: bool, step_qty: int = 1) -> 
             f"{name}　`{bar}`　**{qty:.0f} 份**　_≈ {grams} g_"
         )
 
+        # The DB value is part of the widget key on purpose. Streamlit drops
+        # `value=` once a key exists, so with a fixed key this widget would keep
+        # serving whatever it last held in THIS session — and the write-on-diff
+        # below would then push that stale number back into the DB, silently
+        # reverting a deduction made from 今日规划 in another tab/device (or any
+        # out-of-process write). Folding qty into the key mints a new widget
+        # whenever the stored value changes, so it always re-inits from the DB.
         new_qty = c2.number_input(
             label=f"qty_{item['id']}",
             min_value=0.0,
             value=qty,
             step=float(step_qty),
-            key=f"edit_{item['id']}",
+            key=f"edit_{item['id']}_{qty}",
             label_visibility="collapsed",
         )
         if new_qty != qty:
@@ -303,6 +311,10 @@ def _ai_parse_inventory(raw: str) -> list:
 def _ai_inventory_expander() -> None:
     """⚡ AI 批量录入 — paste free-form text, Gemini parses, preview & commit."""
     with st.expander("⚡ AI 批量录入（粘贴自然语言，自动解析入库）", expanded=False):
+        msg = st.session_state.pop("ai_inv_msg", None)
+        if msg:
+            st.success(msg)
+
         # Step 2: preview & commit
         if "ai_inv_parsed" in st.session_state:
             parsed = st.session_state["ai_inv_parsed"]
@@ -368,6 +380,12 @@ def _ai_inventory_expander() -> None:
                         if ex.get("item_type") == "quantity":
                             cur = float(ex.get("quantity") or 0)
                             set_quantity(ex["id"], cur + portions)
+                            # Keep the snapshot in sync: `existing` is built once
+                            # before the loop, so if the same name appears twice in
+                            # one batch (user typed it twice, or Gemini normalised
+                            # two phrasings to one name) the second pass would read
+                            # the pre-write value and overwrite instead of add.
+                            ex["quantity"] = cur + portions
                         else:
                             toggle_in_stock(ex["id"], True)
                         updated += 1
@@ -382,10 +400,16 @@ def _ai_inventory_expander() -> None:
                             set_quantity(new_id, portions)
                         elif item_type == "boolean":
                             toggle_in_stock(new_id, True)
+                        # Register it so a duplicate name later in the same batch
+                        # accumulates onto this row instead of creating a second one.
+                        existing[name] = {"id": new_id, "item_type": item_type,
+                                          "quantity": portions}
                         added += 1
 
                 st.session_state.pop("ai_inv_parsed", None)
-                st.success(f"✅ 入库完成：新建 {added} 项 · 累加 {updated} 项")
+                # Carried across the rerun below, which discards anything rendered
+                # in this run — otherwise the user never sees the result.
+                st.session_state["ai_inv_msg"] = f"✅ 入库完成：新建 {added} 项 · 累加 {updated} 项"
                 st.rerun()
 
             if bc1.button("← 重新输入", use_container_width=True):
@@ -418,7 +442,7 @@ def _ai_inventory_expander() -> None:
 # ─── Entry point ──────────────────────────────────────────────
 
 def show() -> None:
-    st.title("📦 Inventory 管理")
+    st.title("📦 库存管理")
     data = get_all_inventory()
     raw_leafy = data.get("leafy_veg", [])
     # Groups handle priority; only alpha-sort within so each group is readable

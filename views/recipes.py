@@ -6,8 +6,11 @@ from typing import Optional
 
 import streamlit as st
 
-from db.recipes import (
-    get_all_recipes, get_recipe, get_ingredients,
+from db.recipes import get_recipe, get_ingredients
+# Write functions come from utils.cache, whose wrappers invalidate the read cache
+# automatically — importing them from db.recipes would skip that.
+from utils.cache import (
+    get_all_recipes_cached as get_all_recipes, invalidate_recipes_cache,
     create_recipe, update_recipe, mark_cooked, delete_recipe,
 )
 try:
@@ -418,6 +421,7 @@ def _view_ai_onboard() -> None:
         bc1, bc2 = st.columns(2)
         if bc2.button("✅ 确认入库", type="primary", use_container_width=True):
             rid = create_recipe(recipe, ings)
+            invalidate_recipes_cache()
             st.session_state["ai_ob_rid"] = rid
             if _SEMANTIC_OK:
                 try:
@@ -615,6 +619,7 @@ def _view_detail() -> None:
         st.rerun()
     if ck.button("✅ 已做", use_container_width=True):
         mark_cooked(rid)
+        invalidate_recipes_cache()
         st.success("已更新「上次烹饪」时间")
         st.rerun()
 
@@ -706,6 +711,7 @@ def _view_detail() -> None:
         dc1, dc2 = st.columns(2)
         if dc1.button("🗑️ 确认删除", type="primary", use_container_width=True):
             delete_recipe(rid)
+            invalidate_recipes_cache()
             _goto_list()
             st.rerun()
         if dc2.button("取消", use_container_width=True):
@@ -921,12 +927,14 @@ def _view_form() -> None:
 
         if mode == "edit" and rid:
             update_recipe(rid, recipe_data, ingredient_list)
+            invalidate_recipes_cache()
             if _SEMANTIC_OK:
                 recipe_data["id"] = rid
                 index_recipe(recipe_data, ingredient_list)
             _goto_detail(rid)
         else:
             new_id = create_recipe(recipe_data, ingredient_list)
+            invalidate_recipes_cache()
             if _SEMANTIC_OK:
                 recipe_data["id"] = new_id
                 index_recipe(recipe_data, ingredient_list)

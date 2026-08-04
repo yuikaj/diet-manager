@@ -1,4 +1,5 @@
 """Phase 5: 今日食谱规划 — 智能推荐 + 手动选菜 + Placeholder + 实时营养 + 库存扣减"""
+import json
 import re
 from datetime import datetime, timedelta
 from typing import Optional
@@ -6,8 +7,12 @@ from typing import Optional
 import streamlit as st
 
 from db.init_db import get_connection
-from db.inventory import get_all_inventory, set_quantity
-from db.recipes import get_all_recipes, get_recipe, get_ingredients, mark_cooked
+from db.recipes import get_recipe, get_ingredients
+# mark_cooked comes from utils.cache (auto-invalidates the recipe read cache).
+from utils.cache import (
+    get_all_recipes_cached as get_all_recipes, invalidate_recipes_cache,
+    get_all_inventory_cached as get_all_inventory, set_quantity, mark_cooked,
+)
 from utils.nutrition_lookup import calc_nutrition_with_breakdown, to_grams
 from utils.recommender import recommend
 from utils.pdf_generator import generate_daily_menu_pdf, open_pdf
@@ -18,6 +23,14 @@ _RIDS    = "plan_rids"     # list[str]  — selected recipe IDs (ordered)
 _PH      = "plan_ph"       # list[dict] — placeholder ingredient dicts
 _CONFIRM = "plan_confirm"  # bool       — show deduction confirmation panel
 _COMBOS  = "plan_combos"   # list[dict] | None — recommender output cache
+# Recipe IDs already confirmed+deducted today. Tracked per-dish (not a single
+# "menu done" flag) so that adding a dish after confirming can still be deducted,
+# while dishes already deducted are never deducted twice. The menu itself is kept
+# on screen after confirming so print/publish stay usable.
+_DEDUCTED     = "plan_deducted"      # list[str]
+_DEDUCTED_DAY = "plan_deducted_day"  # "YYYY-MM-DD" — resets the above on day rollover
+_CONFIRM_MSG  = "plan_confirm_msg"   # (level, text) — survives the post-confirm rerun
+_PH_DONE      = "plan_ph_done"       # signature of the placeholder set already logged
 
 # ── Category / method constants ───────────────────────────────
 _CATS_MEAT = ["纯蛋白", "半蛋白半素", "纯素"]
@@ -32,10 +45,54 @@ _CAT_COLOR = {
 
 # ── Init ─────────────────────────────────────────────────────
 
+def _cooked_today() -> list:
+    """Recipe IDs already cooked today, straight from the DB.
+
+    `plan_deducted` alone lives in session state, which is wiped by a refresh, a
+    second tab, or a server restart — and the deduction it guards is a permanent
+    DB write. Re-seeding from `last_cooked` (stamped by mark_cooked in the very
+    same handler that deducts) makes the guard survive those, so re-picking a
+    dish you already cooked today can't silently deduct its ingredients twice.
+    """
+    try:
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT id FROM recipes WHERE date(last_cooked) = date('now','localtime')"
+        ).fetchall()
+        conn.close()
+        return [r["id"] for r in rows]
+    except Exception:
+        return []
+
+
 def _init() -> None:
-    for key, default in [(_RIDS, []), (_PH, []), (_CONFIRM, False), (_COMBOS, None)]:
+    first_visit = _RIDS not in st.session_state
+    for key, default in [(_RIDS, []), (_PH, []), (_CONFIRM, False), (_COMBOS, None),
+                         (_DEDUCTED, []), (_DEDUCTED_DAY, ""), (_PH_DONE, "")]:
         if key not in st.session_state:
             st.session_state[key] = default
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    rolled_over = st.session_state[_DEDUCTED_DAY] != today
+
+    if rolled_over:
+        # A tab left open overnight still holds yesterday's menu. Clearing only
+        # _DEDUCTED would make every one of yesterday's dishes look un-deducted,
+        # and one stray click would re-deduct the whole meal *and* overwrite
+        # today's nutrition log with yesterday's dinner. Start a clean day instead.
+        st.session_state[_DEDUCTED_DAY] = today
+        if not first_visit:
+            st.session_state[_RIDS]    = []
+            st.session_state[_PH]      = []
+            st.session_state[_CONFIRM] = False
+        st.session_state[_PH_DONE] = ""
+
+    if first_visit or rolled_over:
+        st.session_state[_DEDUCTED] = _cooked_today()
+
+
+def _ph_signature(ph: list) -> str:
+    return json.dumps(ph, sort_keys=True, ensure_ascii=False)
 
 
 # ── Small helpers ─────────────────────────────────────────────
@@ -154,7 +211,7 @@ def _build_ings(recipe_ids: list, ph: list, recipes_by_id: dict) -> list:
 
 def _nutrition_preview(recipe_ids: list, ph: list, recipes_by_id: dict) -> None:
     if not recipe_ids and not ph:
-        st.caption("选择菜谱后实时显示营养预估")
+        st.caption("🐾 选好菜后，这里会自动算营养账～")
         return
 
     ings   = _build_ings(recipe_ids, ph, recipes_by_id)
@@ -193,19 +250,23 @@ def _nutrition_preview(recipe_ids: list, ph: list, recipes_by_id: dict) -> None:
 
 # ── Inventory deduction helpers (Portion logic) ───────────────
 
-def _compute_deductions(recipe_ids: list) -> tuple:
+def _main_ingredient_names(recipe_ids) -> set:
+    names: set = set()
+    for rid in recipe_ids:
+        for ing in get_ingredients(rid):
+            if not ing.get("is_condiment"):
+                names.add(ing["name"])
+    return names
+
+
+def _compute_deductions(recipe_ids: list, already_covered: set = frozenset()) -> tuple:
     inv = get_all_inventory()
     item_map: dict = {}
     for cat in ("leafy_veg", "protein", "seasoning", "dry_goods", "other"):
         for item in inv.get(cat, []):
             item_map[item["name"]] = item
 
-    usage_names: set = set()
-
-    for rid in recipe_ids:
-        for ing in get_ingredients(rid):
-            if not ing.get("is_condiment"):
-                usage_names.add(ing["name"])
+    usage_names = _main_ingredient_names(recipe_ids)
 
     deductions    = []
     used_booleans = []
@@ -220,6 +281,11 @@ def _compute_deductions(recipe_ids: list) -> tuple:
                     "name":        name,
                     "item_id":     item["id"],
                     "current_qty": cur_qty,
+                    # Ingredients already deducted by an earlier batch today default
+                    # to 0 so the total doesn't depend on whether the user confirmed
+                    # both dishes at once or one at a time — deductions are keyed by
+                    # ingredient (a set), while confirmation is keyed by dish.
+                    "covered":     name in already_covered,
                 })
             else:
                 used_booleans.append(name)
@@ -314,14 +380,18 @@ def _print_pdf(recipes_by_id: dict) -> None:
         nutr = get_pdf_nutrition_dict()   # JIT — pulls live session state
         path = generate_daily_menu_pdf(recipes, all_ings, nutr)
     open_pdf(path)
-    st.success(f"✅ PDF 已生成并打开：`{path}`")
+    st.success(f"🐾 菜单已经印好啦，正在为你打开：`{path}`")
 
 
 def _print_control_center() -> None:
     """Cross-page state console — same keys as views/nutrition.py.
     Streamlit binds widgets with identical keys to the same session_state slot,
     so edits here flow into the 营养分析 tab automatically and vice versa.
+    The restore/remember pair keeps them alive across visits to OTHER pages,
+    which would otherwise garbage-collect these widgets' state.
     """
+    from views.nutrition import restore_fd_state, remember_fd_state
+    restore_fd_state()
     with st.expander("🎛️ 备餐控制台（与全日营养共享设置）", expanded=False):
         st.caption("修改这里的主食 / 水果 / 临时加菜会即时同步到「📊 营养分析 → 全日营养」标签，"
                    "也会作为 PDF 打印时营养计算的最新依据。")
@@ -353,32 +423,44 @@ def _print_control_center() -> None:
                      label_visibility="collapsed",
                      placeholder="莴笋 150 g\n金针菇 100 g")
 
+    remember_fd_state()
+
 
 def _section_menu(recipes_by_id: dict) -> None:
     rids = st.session_state[_RIDS]
     ph   = st.session_state[_PH]
 
-    h_col, btn_col = st.columns([5, 2])
+    h_col, btn_col, pub_col = st.columns([4, 2, 2])
     h_col.subheader("📋 今日菜单")
     if rids:
         if btn_col.button("🖨️ 打印今日菜单", use_container_width=True):
             _print_pdf(recipes_by_id)
+        if pub_col.button("📢 发布今日菜单", use_container_width=True,
+                          help="发布后，家人打开「🍽️ 今夜のおすすめ」就能看到今天选好的菜和营养摘要"):
+            from views.tonight import publish_today_menu
+            publish_today_menu(rids, ph)
+            st.toast("🐾 已发布，家人现在可以在「🍽️ 今夜のおすすめ」看到今日菜单")
 
     if rids:
         _print_control_center()
 
     if not rids and not ph:
-        st.info("从下方菜谱库选择菜谱，或用「临时占位菜」直接输入食材。")
+        st.info("🐾 菜篮子还空着呢，去下面的菜谱库选几道菜，或者用「临时占位菜」直接写食材吧。")
         return
 
     selected = [recipes_by_id[r] for r in rids if r in recipes_by_id]
 
+    deducted_now = set(st.session_state[_DEDUCTED])
     for i, r in enumerate(selected):
         c1, c2, c3 = st.columns([4.5, 2.5, 0.8])
         wok  = " 🍳" if r.get("uses_wok")   else ""
         para = " ⚡" if r.get("is_parallel") else ""
         t    = f" ({r['cook_time_min']}min)" if r.get("cook_time_min") else ""
-        c1.markdown(f"**{i+1}. {r['name']}**{wok}{para}{t}")
+        # Make "already deducted" visible: otherwise a dish that was confirmed
+        # earlier today (or removed and re-added) silently has no confirm entry
+        # and the user can't tell why.
+        done = "　:green[✓ 已扣库存]" if r["id"] in deducted_now else ""
+        c1.markdown(f"**{i+1}. {r['name']}**{wok}{para}{t}{done}")
         if r.get("category"):
             c2.markdown(_cat_txt(r["category"]))
         if c3.button("✕", key=f"rm_{r['id']}"):
@@ -392,7 +474,10 @@ def _section_menu(recipes_by_id: dict) -> None:
     for msg in _wok_violations(selected):
         st.error(msg)
 
-    bored = _boredom_violations(rids)
+    # Skip dishes confirmed earlier today: mark_cooked just stamped them, so they
+    # would otherwise flag themselves as "刚做过" the moment you confirm.
+    deducted = st.session_state[_DEDUCTED]
+    bored = _boredom_violations([r for r in rids if r not in deducted])
     if bored:
         st.warning(f"🔄 防厌倦：「{'、'.join(bored)}」48小时内刚做过，建议换菜")
 
@@ -401,24 +486,90 @@ def _section_menu(recipes_by_id: dict) -> None:
         st.warning(f"🔴 易坏优先：**{'、'.join(uncov)}** 库存充足但今日菜单未消耗，建议加菜")
 
 
+def _start_new_round(retract_published: bool) -> None:
+    cleared = list(st.session_state[_RIDS])
+    st.session_state[_RIDS]     = []
+    st.session_state[_PH]       = []
+    st.session_state[_CONFIRM]  = False
+    st.session_state["plan_ph_raw"] = ""   # else 「✔ 更新占位菜」 revives last round's text
+    st.session_state[_COMBOS]   = None
+    st.session_state[_PH_DONE]  = ""
+    # NOTE: _DEDUCTED is deliberately NOT cleared — it records what was already
+    # taken out of inventory *today*. Clearing it would let the same dish be
+    # deducted a second time by re-picking it.
+    for k in [k for k in st.session_state if k.startswith("plan_deduct_")]:
+        del st.session_state[k]
+
+    # Only retract the family view if it is showing the menu being cleared.
+    # Blanket-clearing would wipe tonight's published menu the moment you start
+    # planning tomorrow — while your family is still looking at it.
+    if retract_published and cleared:
+        try:
+            from views.tonight import get_today_menu, clear_today_menu
+            published = set(get_today_menu().get("recipe_ids") or [])
+            if published and published <= set(cleared):
+                clear_today_menu()
+        except Exception:
+            pass
+
+
 def _section_confirm(recipes_by_id: dict) -> None:
-    rids = st.session_state[_RIDS]
-    if not rids:
+    rids     = st.session_state[_RIDS]
+    ph       = st.session_state[_PH]
+    deducted = st.session_state[_DEDUCTED]
+    pending  = [r for r in rids if r not in deducted]
+    # A placeholder-only menu still needs a confirm entry — it deducts nothing,
+    # but it is the only way its ingredients reach the daily nutrition log.
+    ph_pending = bool(ph) and st.session_state[_PH_DONE] != _ph_signature(ph)
+
+    if not rids and not ph and not deducted:
         return
 
     st.divider()
 
-    if not st.session_state[_CONFIRM]:
-        if st.button("✅ 确认菜单并扣减库存", type="primary", use_container_width=True):
-            st.session_state[_CONFIRM] = True
+    # Surface the outcome of the previous confirm click (the st.rerun() that
+    # follows it discards anything rendered in that run, including error text).
+    msg = st.session_state.pop(_CONFIRM_MSG, None)
+    if msg:
+        level, text = msg
+        (st.warning if level == "warning" else st.success)(text)
+
+    if not pending and not ph_pending:
+        done_here = [r for r in rids if r in deducted]
+        if rids:
+            st.success(f"🐾 喵！这 {len(done_here)} 道菜的库存都扣好了。菜单还留在上面，可以继续打印或发布～")
+        elif ph:
+            st.success("🐾 临时占位菜已记入今日营养。")
+        else:
+            # Menu emptied after confirming — don't claim a menu is "still up there".
+            st.info("🐾 今天已经扣过库存了。菜单已被清空，可以重新选菜（今天做过的菜不会重复扣减）。")
+        if st.button("🆕 开始新一轮规划（清空当前菜单）", use_container_width=True):
+            _start_new_round(retract_published=True)
             st.rerun()
         return
 
-    deductions, used_booleans, unmatched = _compute_deductions(rids)
-    names = [recipes_by_id[r]["name"] for r in rids if r in recipes_by_id]
+    if not st.session_state[_CONFIRM]:
+        if pending:
+            label = ("✅ 确认菜单并扣减库存" if not deducted
+                     else f"✅ 新增了 {len(pending)} 道菜，确认并扣减")
+        else:
+            label = "✅ 确认并记入今日营养"   # placeholder-only: nothing to deduct
+        if st.button(label, type="primary", use_container_width=True):
+            st.session_state[_CONFIRM] = True
+            st.rerun()
+        if deducted:
+            st.caption(f"已扣减过的 {len(deducted)} 道菜不会重复扣减。")
+        return
+
+    # Only the not-yet-deducted dishes participate — re-confirming must never
+    # deduct twice for a dish that was already settled earlier today.
+    covered = _main_ingredient_names(deducted)
+    deductions, used_booleans, unmatched = _compute_deductions(pending, covered)
+    names = [recipes_by_id[r]["name"] for r in pending if r in recipes_by_id]
 
     st.subheader("🗃️ 扣减提议 (按份)")
-    st.caption(f"菜单：{' + '.join(names)}\n\n系统默认扣减 1 份，请根据实际消耗量微调：")
+    head = f"菜单：{' + '.join(names)}" if names else "临时占位菜"
+    st.caption(f"{head}\n\n系统默认扣减 1 份，请根据实际消耗量微调：")
 
     deduct_inputs = {}
 
@@ -426,11 +577,15 @@ def _section_confirm(recipes_by_id: dict) -> None:
         with st.container(border=True):
             for row in deductions:
                 c1, c2, c3 = st.columns([3, 2, 3])
-                c1.write(f"**{row['name']}**")
+                tag = "　:gray[今天已扣过]" if row.get("covered") else ""
+                c1.write(f"**{row['name']}**{tag}")
                 c2.write(f"当前: {row['current_qty']:.0f} 份")
-                
-                default_deduct = 1.0 if row['current_qty'] >= 1 else 0.0
-                
+
+                # min(), not a 0 fallback: with `0.0` a leftover 0.5 份 could never
+                # be used up by the default flow, so it sat in stock forever while
+                # still counting as "有货" for the can-I-cook-this filter.
+                default_deduct = 0.0 if row.get("covered") else min(1.0, row['current_qty'])
+
                 deduct_inputs[row['item_id']] = {
                     "current": row['current_qty'],
                     "deduct": c3.number_input(
@@ -484,22 +639,28 @@ def _section_confirm(recipes_by_id: dict) -> None:
                 set_quantity(item_id, max(0.0, vals["current"] - vals["deduct"]))
 
         # 3. Mark recipes as cooked (last_cooked timestamp → 48h 防厌倦)
-        for rid in rids:
+        for rid in pending:
             mark_cooked(rid)
+        invalidate_recipes_cache()
 
         # 4. Auto-remove these recipes from 🌌 食愿之书 (done = wish fulfilled)
         wishlist_removed = 0
         try:
             from views.wishlist import remove_by_recipe_ids
-            wishlist_removed = remove_by_recipe_ids(rids)
+            wishlist_removed = remove_by_recipe_ids(pending)
         except Exception:
             pass
 
-        st.session_state[_RIDS]    = []
-        st.session_state[_PH]      = []
         st.session_state[_CONFIRM] = False
+        st.session_state[_DEDUCTED] = deducted + pending
+        st.session_state[_PH_DONE]  = _ph_signature(ph)
         wl_msg = f" · 🌌 食愿之书消去 {wishlist_removed} 道" if wishlist_removed else ""
-        st.success(f"✅ 库存份数已更新{nutrition_msg}{wl_msg}")
+        # Carried across the rerun below, which would otherwise discard it — this
+        # is the only channel that reports a failed nutrition save.
+        st.session_state[_CONFIRM_MSG] = (
+            "warning" if "⚠️" in nutrition_msg else "success",
+            f"🐾 库存已经更新好啦{nutrition_msg}{wl_msg}",
+        )
         st.balloons()
         st.rerun()
 
@@ -565,6 +726,10 @@ def _section_picker(all_recipes: list, recipes_by_id: dict) -> None:
                         key=f"pair_add_{pid}", use_container_width=True,
                     ):
                         st.session_state[_RIDS].append(pid)
+                        # Same as the other add/remove sites: collapse the open
+                        # deduction panel so the new dish can't slip into a
+                        # proposal the user already scrolled past.
+                        st.session_state[_CONFIRM] = False
                         st.rerun()
 
     # ── Cuisine auto-anchor hint ──────────────────────────────
@@ -575,7 +740,7 @@ def _section_picker(all_recipes: list, recipes_by_id: dict) -> None:
     if anchor_cuisines:
         st.caption(f"🍱 已锁定菜系：{'、'.join(sorted(anchor_cuisines))}（可在下方菜系筛选中按需聚焦）")
 
-    avail_only = st.toggle("🥕 仅显示可做的晚餐（根据现有库存）", key="picker_avail_only")
+    avail_only = st.toggle("🥕 仅显示可做的晚餐（根据现有库存）", value=True, key="picker_avail_only")
     if avail_only:
         inv = get_all_inventory()
         available = _build_avail_set(inv)
@@ -619,7 +784,7 @@ def _section_picker(all_recipes: list, recipes_by_id: dict) -> None:
 
     # Wishlist IDs (any in wishlist, regardless of date) → ⭐ marker in picker
     from views.wishlist import get_wishlist
-    wishlist_rids = {w["recipe_id"] for w in get_wishlist()}
+    wishlist_rids = {w["recipe_id"] for w in get_wishlist() if w.get("recipe_id")}
 
     h1, h2, h3, h4 = st.columns([4, 2.5, 1, 1])
     h1.caption("菜名")
@@ -714,7 +879,7 @@ def show() -> None:
         expanded=st.session_state["picker_expanded"],
     ):
         if not all_recipes:
-            st.info("菜谱库为空，请先在「🍳 菜谱库」页面添加菜谱。")
+            st.info("🐾 菜谱库还空空的，先去「🍳 菜谱库」添加第一道菜吧。")
         else:
             _section_picker(all_recipes, recipes_by_id)
 

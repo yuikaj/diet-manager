@@ -12,7 +12,8 @@ import pandas as pd
 from db.init_db import get_connection
 from db.daily_log import save_daily_log, get_recent_logs, get_recent_logs_full
 from db.nutrition import get_all_cached_names, invalidate_cache, update_cached_nutrients
-from db.recipes import get_all_recipes, get_ingredients, get_recipe
+from db.recipes import get_ingredients, get_recipe
+from utils.cache import get_all_recipes_cached as get_all_recipes
 from utils.nutrition_lookup import (
     MealNutrition, NutritionPer100g,
     lookup_ingredient, to_grams, calc_nutrition_with_breakdown,
@@ -777,13 +778,42 @@ def _meal_card(title: str, base: dict, detail_lines: list) -> None:
     st.caption(f"钠 {base['sodium']:.0f} mg · 纤维 {base['fiber']:.1f} g")
 
 
+# ── 备餐控制台 cross-page persistence ─────────────────────────
+# These are widget keys, and Streamlit garbage-collects a widget's state on any
+# run where that widget is not rendered. 今日规划 and 营养分析 both render them so
+# hopping between those two is safe, but visiting ANY third page (库存, 菜谱库…)
+# silently wipes them: the user's 临时加菜 / 主食 / 水果 vanish and the daily
+# nutrition log is then saved without that food. Mirroring into plain (non-widget)
+# keys makes the values survive; the widgets re-seed from the mirror.
+_FD_KEYS = (
+    "fd_bfst_skip", "fd_bfst_custom_txt", "fd_lunch_skip", "fd_lunch_custom_txt",
+    "fd_staple_choice", "fd_staple_g", "fd_staple_custom_txt",
+    "fd_fruits", "fd_fruit_g", "fd_dinner_addons_txt",
+)
+
+
+def restore_fd_state() -> None:
+    """Re-seed 备餐控制台 keys from the mirror. Must run BEFORE those widgets render."""
+    for k in _FD_KEYS:
+        mirror = f"_keep_{k}"
+        if k not in st.session_state and mirror in st.session_state:
+            st.session_state[k] = st.session_state[mirror]
+
+
+def remember_fd_state() -> None:
+    """Mirror current 备餐控制台 values. Run AFTER those widgets render."""
+    for k in _FD_KEYS:
+        if k in st.session_state:
+            st.session_state[f"_keep_{k}"] = st.session_state[k]
+
+
 def compute_fullday_silent() -> dict:
     """Pure compute: reads session state, returns full-day nutrition dict.
 
-    No UI side effects (no spinner, no rerun, no st.session_state writes).
     Callable from any page — e.g., plan.py uses it to JIT-compute PDF nutrition
     without forcing the user to visit the 营养分析 tab first.
     """
+    restore_fd_state()   # the控制台 widgets may have been GC'd by a page switch
     zero = {k: 0.0 for k in _NUTR_KEYS}
 
     bfst_skip        = st.session_state.get("fd_bfst_skip", False)
@@ -797,6 +827,10 @@ def compute_fullday_silent() -> dict:
     fruit_g          = int(st.session_state.get("fd_fruit_g", 65))
     rids             = list(st.session_state.get("plan_rids", []))
     dinner_addons_txt= st.session_state.get("fd_dinner_addons_txt", "").strip()
+    # 「✏️ 临时占位菜」from 今日规划. Same shape as _parse_placeholder output and
+    # likewise cooked for two, so it joins dinner_ings and gets halved below.
+    # Without this a placeholder-only dinner (乱炖 etc.) never reached daily_logs.
+    plan_ph          = list(st.session_state.get("plan_ph", []))
 
     # ── Breakfast ─────────────────────────────────────────────
     bfst_custom_ings = []
@@ -832,8 +866,11 @@ def compute_fullday_silent() -> dict:
 
     # ── Dinner (÷2 per person, then ×serving_ratio) ──────────
     dinner_n, dinner_names = dict(zero), []
-    if rids or dinner_addons_txt:
+    if rids or dinner_addons_txt or plan_ph:
         dinner_ings = []
+        if plan_ph:
+            dinner_ings.extend(plan_ph)
+            dinner_names.extend([i["name"] for i in plan_ph if i.get("name")])
         if rids:
             for rid in rids:
                 r = get_recipe(rid)
@@ -925,6 +962,7 @@ def _do_compute_fullday() -> None:
 
 
 def _tab_fullday() -> None:
+    restore_fd_state()   # values may have been GC'd while the user was on another page
     st.caption("全日数据均为每人。早午餐可跳过或自定义，晚餐从今日规划导入（÷2 取每人份）。")
 
     # ── Breakfast ─────────────────────────────────────────────
@@ -992,6 +1030,8 @@ def _tab_fullday() -> None:
         st.text_area("主食食材（每人份）", height=80, key="fd_staple_custom_txt",
                      label_visibility="collapsed",
                      placeholder="意大利面（熟）150 g\n乌冬面（熟）200 g")
+
+    remember_fd_state()   # all 备餐控制台 widgets rendered above — mirror them now
 
     st.divider()
 

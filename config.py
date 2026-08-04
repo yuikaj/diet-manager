@@ -11,6 +11,7 @@ CHROMA_PATH = DATA_DIR / "chroma"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 USDA_API_KEY = os.getenv("USDA_API_KEY")
+APP_ACCESS_PASSWORD = os.getenv("APP_ACCESS_PASSWORD")
 
 # Nutrition advisor: max calls per day (Gemini free tier protection)
 AI_ADVICE_DAILY_LIMIT = 3

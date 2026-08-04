@@ -47,5 +47,11 @@ Thumbs.db
 # ── Streamlit ────────────────────────────────────────────
 .streamlit/secrets.toml
 
+# ── Personal photos (family pet, not for the public portfolio repo) ──
+assets/mimi/
+
 # ── Generated output ─────────────────────────────────────
 *.pdf
+
+# ── Runtime logs (launchd services, see CLAUDE.md #18) ──
+logs/

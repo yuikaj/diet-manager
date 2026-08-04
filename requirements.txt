@@ -1,8 +1,11 @@
 # Python >= 3.9 required (system `python` may be 2.7 on macOS — use python3.9)
 
 # ── Core ─────────────────────────────────────────────────
-streamlit>=1.32.0
+# >=1.49 required: st.container(horizontal=...) for mobile-safe single-line rows
+# (st.columns stacks vertically on narrow screens) and the width="content" API.
+streamlit>=1.49.0
 python-dotenv>=1.0.0
+watchdog>=4.0.0  # faster file-change detection, avoids Streamlit's slow polling watcher
 
 # ── Nutrition API (Phase 4) ───────────────────────────────
 requests>=2.31.0

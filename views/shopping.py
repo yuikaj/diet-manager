@@ -131,7 +131,10 @@ def _commit_to_inventory(items: list) -> tuple:
 
     Returns (success: bool, message: str).
     """
-    from db.inventory import get_all_inventory, set_quantity, toggle_in_stock, add_item
+    from utils.cache import (
+        get_all_inventory_cached as get_all_inventory,
+        set_quantity, toggle_in_stock, add_item,
+    )
 
     try:
         inv = get_all_inventory()

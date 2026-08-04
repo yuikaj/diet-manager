@@ -10,8 +10,11 @@ import random
 from datetime import datetime, timedelta
 from typing import Optional
 
-from db.inventory import get_all_inventory
-from db.recipes import get_all_recipes, get_all_ingredients_grouped
+from utils.cache import (
+    get_all_inventory_cached as get_all_inventory,
+    get_all_recipes_cached as get_all_recipes,
+    get_all_ingredients_grouped_cached as get_all_ingredients_grouped,
+)
 
 _DIFF_RANK     = {"简单": 0, "中等": 1, "繁琐": 2}
 _REQUIRED_CATS = ["纯蛋白", "半蛋白半素", "纯素"]
