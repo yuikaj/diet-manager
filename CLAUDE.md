@@ -281,6 +281,63 @@ PRD 描述的是三级降级；实际实现了**四级降级**（SQLite cache �
 - `~/Library/LaunchAgents/com.dietmanager.backup.plist`：`StartCalendarInterval` 每天 03:00 自动跑一次（不是 `KeepAlive` 常驻服务，是定时任务）
 - 数据量很小（DB ~1MB + 营养库 JSON ~0.3MB，14 天滚动备份总共几十 MB），iCloud 免费 5GB 额度完全覆盖，不产生费用
 
+### 26. 营养目标个人化：热量 / 供能比例 / 补剂（`⚙️ 设置`）
+排查「1680 kcal 却显示 84% 达标」时挖出一串相互纠缠的问题，逐层修：
+
+**a. `target_kcal_per_day` 是个死设置**。它从项目初期就存在于 `user_settings`（值 1800），但**没有任何代码读过它**——所有 DRI 条都在跟 `_DRI` 里写死的 2000 比。现在 `get_kcal_target()` 读设置，`_dri()` 统一分发，营养面板/7日热力图/AI 建议三处共用。
+
+**b. 只改热量会让各条 DRI 互相打架**。碳水 300g / 脂肪 65g 这些 FDA 标签值的前提就是 2000 kcal 饮食（300×4=1200 kcal 正好 60%）。目标降到 1700 后碳水还要求 300g，光碳水就占 71%，那条**永远不可能在不超热量的前提下达标**。
+
+**c. 各自按固定比例缩放也不行**。标签假设蛋白质只占 10%，而按体重算出来是 19%，三项加起来 108%。最终方案：三大营养素**统一由供能比例推导**（`get_macro_split()`，存 `macro_pct_*`），构造上必然合计 100%。当前设定 蛋白 25% / 脂肪 30% / 碳水 45%（AMDR 范围内：蛋白 10-35%、脂肪 20-35%、碳水 45-65%）。设置页可调，合计不等于 100% 不让保存。
+
+**d. 蛋白质有两套目标在打架**。`_results` 的蛋白质条用「体重×系数」，碳水/脂肪条用能量占比，同一页面上可能一个说达标一个说不足。现已全部走 `_dri()`。`views/plan.py` 的晚餐蛋白质目标也改为**全日目标的 35-45%**（原来是自己另算一套「两人体重×系数」）。
+
+**e. 每日补剂**（`get_supplements()` / `daily_supplements`）：维D 这类靠食物极难达标，不记进来 DRI 条会一直是红的、失去预警意义。设置页可填维D/钙/铁，自动加进全日合计。
+
+### 27. 脂肪细分（饱和 / 单不饱和 / 多不饱和）
+DB migration **step 15** 加三列 `satfat/monofat/polyfat_per_100g`，贯通 USDA 抓取（营养素 ID 1258/1292/1293）、缓存读写、AI 录入、手动修正表单、缓存库表格、营养面板、历史热力图。
+
+- **缺数据必须保持 NULL 而不是 0**：界面靠「是否为 NULL」判断该食材有没有细分数据。`MealNutrition.fat_detailed` 记录「有细分数据的那部分脂肪有多少克」，据此显示覆盖率——否则「饱和 0.3g」出现在一顿 22g 脂肪的饭旁边会被当成真实比例，实际只是大部分食材没数据
+- 饱和脂肪按**上限**逻辑判色（像钠），上限 = 热量目标 × 10%（AHA 建议）
+- 回填分两条路：`scripts/backfill_fat_detail.py` 按 USDA ID 回查（**只覆盖 37 条**——注意 `usda_food_id` 里有 614 条是 `local_` 前缀，不是真 FDC ID，我一开始误判成 664 条可回填）；`scripts/ai_fill_fat_detail.py` 按**脂肪贡献量排序**用 Gemini 补，因为脂肪高度集中——补前 46 种就把加权覆盖率从 16% 拉到 83%
+
+### 28. 默认早午餐拆掉硬编码字典，改走营养引擎
+`_BFST_BASE` / `_LUNCH_BASE` 是 PRD 时期的估算字典。宏量还算准（早餐 580 vs 实算 596），但**微量营养素错得离谱**：维A 60µg vs 实际 630µg（**低估 10.7 倍**）、镁 80mg vs 275mg（低估 3.4 倍）。原因是南瓜/红薯是 β-胡萝卜素大户（红薯 709 µg RAE/100g）、火麻仁镁密度 700mg/100g，当年估算没算进去。
+
+**这是「维A/镁 常年 🔴」的主因**，比食材库数据缺口的影响大得多。现改为 `_BFST_INGS` / `_LUNCH_INGS` 真实食材清单，跟晚餐走同一套 `calc_nutrition_with_breakdown()`——以后食材数据改进它自动跟着准。同时补录了 9 种缺失配料（干杂豆/钢切燕麦/三色藜麦/红薯/奇亚籽/火麻仁/燕麦麸皮/黑咖啡/混合坚果）。
+
+**教训**：任何"预先算好的营养数字"都会悄悄失真，能走引擎就别写死。
+
+### 29. 营养数据体检 + 微量营养素回填
+`🗄️ 食材库` 顶部新增「🩺 营养数据体检」，报告两类**静默失效**：
+- **① 完全未收录**：缓存和 local json 里都没有 → 计算时整个食材被忽略
+- **② 有记录但空壳**：缓存里有这条但热量/蛋白/脂肪/碳水全 0（且钠也为 0）→ 看着匹配上了，实际按 0 计入
+
+判据细节：**必须带上"钠也为 0"**，否则盐、小苏打这类本身零卡但含钠的会被误报。另外**不能因为 local json 里有数据就不报**——缓存是 tier 1，会 shadow local json（「牛排」那个坑），排除掉恰好会掩盖最危险的情况。
+
+按「被几道菜使用」排序，默认隐藏水类和 `步骤1`/`详见步骤` 这类导入噪音。
+
+微量营养素同样存在大面积缺口（维A 只有 28% 条目有数据、维D 11%），`scripts/ai_fill_micronutrients.py` 按用量排序回填，实测维A/镁/锌加权覆盖率 ~50% → ~86%。
+
+### 30. 其它交互改进
+- **推荐区单菜添加**：每道菜右侧 ＋ 按钮，可跨两个套餐挑菜，不必整套采用。widget key 必须带**套餐序号**（同一道菜可能同时出现在两个套餐里，撞 key 会让整页停止渲染）
+- **食材修正表单**（`ingredient_fix_form`）：食材明细下方直接改营养数据，下拉只列当前明细里的食材。因为缓存库那个 `data_editor` 是虚拟滚动的，**Chrome 的 Ctrl+F 搜不到**（只有可见行在 DOM 里），在 665 行里翻找很痛苦；缓存库也补了名称筛选框
+- **水果种类可扩展**：`multiselect(accept_new_options=True)` + 存 `user_settings.custom_fruits` 持久化（光靠 `accept_new_options` 只能维持当前会话）
+- **食用油统一为牛油果油**：改的是**数据层**不是菜谱——菜谱里的「油」本就是"随便什么食用油"的意思，改成「牛油果油」要动 34 道菜且以后换油还得再改。把 8 个泛称（油/食用油/烹饪油/热油/炸油/无味油/植物油/牛油果油）的营养值换成牛油果油即可。橄榄油/芝麻油/猪油/黄油等有特定风味用途的保持原样
+- **历史 DRI 热力图 9 项 → 15 项**：`daily_logs` 一直存着 14 种营养素，热力图却只显示 9 种，钾/维D/维A/镁/锌白存了几个月。补全后立刻暴露出维D 长期 24%（后由补剂设置解决）。老记录缺的字段显示「—」而不是 0%，否则饱和脂肪会对所有历史记录显示 ✅
+
+### 31. GitHub 私有仓库自动备份（`scripts/backup_to_git.py`）
+iCloud 那条链路查下来是账号层问题（CloudKit `Code=20 ManagedAccountRestricted`，家庭共享账号查不到配额），治不好也不必治。改用私有仓库：
+- 存**文本 SQL dump 而不是二进制 .db**：git 对二进制几乎无法增量压缩，每天提交 1MB 的 .db 一年会涨到 ~133MB；文本每天只增加变化的几 KB，一年约 5-10MB。附带好处是能在网页上直接看 diff
+- dump 前用 sqlite3 在线备份 API 取一致性快照（同 24 条的 WAL 问题）
+- **没有独立的 LaunchAgent**：macOS Ventura 的后台项目审批会拦新添加的 agent（`posix_spawn` → `Operation not permitted`，exit 78），而已获批的 `com.dietmanager.backup` 跑得好好的。所以并进那个任务里，一个任务干两件事
+- 恢复方法见数据仓库的 README
+
+### 32. Gemini 模型可用性变化（2026-08 实测）
+`gemini-2.0-flash` 的免费额度已被 Google 收回，API 返回 `limit: 0`（不是超配额，是彻底不可用）。实测可用：`gemini-flash-lite-latest` ✅、`gemini-2.5-flash` ✅、`gemini-flash-latest` ✅；`gemini-2.5-flash-lite` 返回 404。
+
+app 内的 AI 功能（AI 入库/AI 录入/库存解析/购物清单解析）用的都是 `gemini-flash-lite-latest`，**不受影响**。但 CLAUDE.md 旧版里「gemini-2.0-flash 1500 RPD」的说法已过时，新写脚本别再用它。
+
 ---
 
 ## 待优化方向（未实现，按优先级排序）
@@ -299,7 +356,7 @@ PRD 描述的是三级降级；实际实现了**四级降级**（SQLite cache �
 
 1. **部分菜谱食材名不规范**：来自原始菜谱的非标准名（如"各种海鲜"、"冷水"、"适量"）会出现在 seed 脚本的缺失列表中，查询无意义。可在 `scripts/seed_nutrition_ai.py` 的 `_collect_missing` 中加过滤词列表，或手动忽略。
 
-2. **Gemini 配额**：`gen_recipe_descriptions.py` 默认 `gemini-flash-lite-latest`（高配额）；`seed_nutrition_ai.py` 默认 `gemini-2.0-flash`（1500 RPD）；AI 入库也使用 `gemini-2.0-flash`；营养顾问使用 `gemini-2.5-flash`（25 RPD，但有 3次/天 应用层限制）。
+2. **Gemini 模型**：`gemini-2.0-flash` 已不可用（免费额度归零，见第 32 条）。现役：app 内 AI 功能与批量脚本用 `gemini-flash-lite-latest`（高配额），营养顾问用 `gemini-2.5-flash`（25 RPD + 应用层 3次/天）。`scripts/seed_nutrition_ai.py` 里若仍写着 2.0-flash 需要改。
 
 3. **菜谱数据质量**：DB 中仍有约 149 条 `needs_review` 菜谱（调料未结构化）。可用 `scripts/clean_recipes_ai.py` 补全，或在 UI 中手动编辑。
 
@@ -309,7 +366,9 @@ PRD 描述的是三级降级；实际实现了**四级降级**（SQLite cache �
 
 6. **语义搜索偏离**：当前的语义索引在处理“清淡一些”等模糊口味描述时存在偏移（由于向量空间中负面词汇的关联）。短期方案：手动在 UI 过滤或通过 cuisine/tag 硬过滤。
 
-7. **食愿之书「📖 卷宗」已存清单仍用 `st.columns`**：`views/wishlist.py` 的 `_list_view()`（展示已经写入书中的条目）还是分栏布局，在窄屏会被拆成多行——跟当初「➕ 录入新愿」浏览列表一样的问题，只是还没照 `st.container(horizontal=True)` 的模式重做。优先级不高（这里主要是查看，不是高频操作），但如果继续做手机端优化，这是下一个该动的地方。
+7. **微量营养素仍有 ~14% 用量未覆盖**：维A/镁/锌回填到加权 86% 后停手（回填按用量排序，长尾收益递减）。想继续补：`python3.9 scripts/ai_fill_micronutrients.py --nutrient vita,magnesium,zinc --top 150`。脂肪细分同理，当前加权 83%。
+
+8. **食愿之书「📖 卷宗」已存清单仍用 `st.columns`**：`views/wishlist.py` 的 `_list_view()`（展示已经写入书中的条目）还是分栏布局，在窄屏会被拆成多行——跟当初「➕ 录入新愿」浏览列表一样的问题，只是还没照 `st.container(horizontal=True)` 的模式重做。优先级不高（这里主要是查看，不是高频操作），但如果继续做手机端优化，这是下一个该动的地方。
 
 ---
 
@@ -345,7 +404,11 @@ PRD 描述的是三级降级；实际实现了**四级降级**（SQLite cache �
 | `scripts/clean_recipes_ai.py` | Gemini 批量清洗菜谱结构（食材克重、步骤、分类） |
 | `scripts/gen_recipe_descriptions.py` | Gemini 批量生成 en_name/en_desc/zh_desc，支持 `--recipe`/`--force`/`--dry-run` |
 | `scripts/build_recipe_embeddings.py` | 一次性建立 ChromaDB 索引（全量菜谱） |
-| `scripts/backup_to_icloud.py` | 每日备份 diet.db + local_nutrition.json 到 iCloud，launchd 定时触发（见第 24 条） |
+| `scripts/backup_to_icloud.py` | 每日备份到 iCloud，并顺带调用 backup_to_git（见第 24/31 条） |
+| `scripts/backup_to_git.py` | 每日推送文本 SQL dump 到私有仓库 diet-manager-data（见第 31 条） |
+| `scripts/backfill_fat_detail.py` | 按 USDA ID 回填脂肪细分（仅覆盖带真实 FDC ID 的条目） |
+| `scripts/ai_fill_fat_detail.py` | Gemini 按脂肪贡献量排序补细分，`--top 46` 覆盖 80% 摄入 |
+| `scripts/ai_fill_micronutrients.py` | Gemini 按用量排序补维A/镁/锌等，`--nutrient vita --top 40` |
 
 ## 运行环境
 

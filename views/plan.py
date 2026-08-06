@@ -16,7 +16,7 @@ from utils.cache import (
 from utils.nutrition_lookup import calc_nutrition_with_breakdown, to_grams
 from utils.recommender import recommend
 from utils.pdf_generator import generate_daily_menu_pdf, open_pdf
-from views.nutrition import get_pdf_nutrition_dict, _FRUITS_LIST
+from views.nutrition import get_pdf_nutrition_dict, get_fruits_list, remember_new_fruits
 
 # ── Session state keys ────────────────────────────────────────
 _RIDS    = "plan_rids"     # list[str]  — selected recipe IDs (ordered)
@@ -124,20 +124,26 @@ def _parse_ph(text: str) -> list:
     return result
 
 
+# Share of the daily protein target that dinner is expected to cover. Matches
+# the "晚餐理想约 35–40%" guidance shown on the 营养分析 page.
+_DINNER_PROTEIN_SHARE = (0.35, 0.45)
+
+
 def _protein_target() -> tuple:
+    """(min, max) dinner protein for ONE person, as a slice of the daily target.
+
+    This used to be its own body-weight × multiplier calculation, which meant
+    今日规划 and 营养分析 scored protein against two unrelated targets — one could
+    say 达标 while the other said 不足 for the same meal. Both now derive from the
+    macro split configured in ⚙️ 设置.
+    """
     try:
-        conn = get_connection()
-        rows = {r["key"]: r["value"] for r in conn.execute(
-            "SELECT key, value FROM user_settings"
-        ).fetchall()}
-        conn.close()
-        wa = float(rows.get("weight_a", 65))
-        wb = float(rows.get("weight_b", 55))
-        mn = float(rows.get("protein_multiplier_min", 1.2))
-        mx = float(rows.get("protein_multiplier_max", 1.5))
-        return (wa + wb) * mn, (wa + wb) * mx
+        from views.nutrition import _dri
+        daily_1p = _dri()["protein"]
     except Exception:
-        return 144.0, 180.0
+        daily_1p = 106.0
+    lo, hi = _DINNER_PROTEIN_SHARE
+    return daily_1p * lo, daily_1p * hi
 
 
 # ── Constraint checks ─────────────────────────────────────────
@@ -227,10 +233,12 @@ def _nutrition_preview(recipe_ids: list, ph: list, recipes_by_id: dict) -> None:
     c4.metric("钠 / 人",     f"{n.sodium/pp:.0f} mg")
 
     if n.found > 0:
+        # p_min/p_max are already per-person dinner targets — don't divide again.
         prot_pp = n.protein / pp
-        pct = min(prot_pp / (p_max / pp), 1.0) if p_max > 0 else 0.0
-        dot = "🟡" if prot_pp < p_min / pp else ("🟢" if prot_pp <= p_max / pp else "🔵")
-        st.progress(pct, text=f"{dot} 蛋白质/人 {prot_pp:.1f}g  目标 {p_min/pp:.0f}–{p_max/pp:.0f}g")
+        pct = min(prot_pp / p_max, 1.0) if p_max > 0 else 0.0
+        dot = "🟡" if prot_pp < p_min else ("🟢" if prot_pp <= p_max else "🔵")
+        st.progress(pct, text=f"{dot} 蛋白质/人 {prot_pp:.1f}g　晚餐目标 {p_min:.0f}–{p_max:.0f}g"
+                              f"（全日 {p_max/_DINNER_PROTEIN_SHARE[1]:.0f}g 的 35–45%）")
 
     sod_pp = n.sodium / pp
     if sod_pp > 2300:
@@ -246,6 +254,8 @@ def _nutrition_preview(recipe_ids: list, ph: list, recipes_by_id: dict) -> None:
                 use_container_width=True,
                 hide_index=True,
             )
+            from views.nutrition import ingredient_fix_form
+            ingredient_fix_form([r["食材"] for r in bds], "fixplan")
 
 
 # ── Inventory deduction helpers (Portion logic) ───────────────
@@ -324,8 +334,9 @@ def _section_recommend() -> None:
         st.warning("⚠️ 暂无合适的推荐组合。")
         return
 
+    current = set(st.session_state[_RIDS])
     cols = st.columns(len(combos))
-    for col, combo in zip(cols, combos):
+    for ci, (col, combo) in enumerate(zip(cols, combos)):
         recipes = combo["recipes"]
         stats   = combo["stats"]
         with col:
@@ -333,7 +344,20 @@ def _section_recommend() -> None:
                 for i, r in enumerate(recipes):
                     icons = ("🍳 " if r.get("uses_wok") else "") + ("⚡" if r.get("is_parallel") else "")
                     t = f" {r['cook_time_min']}min" if r.get("cook_time_min") else ""
-                    st.markdown(f"**{i+1}. {r['name']}** {icons}{t}")
+                    # Per-dish add, so a combo can be cherry-picked instead of
+                    # taken whole. Key carries the combo index because the same
+                    # recipe can legitimately appear in both combos, and two
+                    # identical widget keys abort the whole page render.
+                    with st.container(horizontal=True, horizontal_alignment="distribute"):
+                        st.markdown(f"**{i+1}. {r['name']}** {icons}{t}")
+                        if r["id"] in current:
+                            st.button("✓", key=f"rec_add_{ci}_{r['id']}", disabled=True,
+                                      help="已在今日菜单中")
+                        elif st.button("＋", key=f"rec_add_{ci}_{r['id']}",
+                                       help="只把这道菜加入今日菜单"):
+                            st.session_state[_RIDS].append(r["id"])
+                            st.session_state[_CONFIRM] = False
+                            st.rerun()
                     if r.get("category"):
                         st.caption(" · ".join(r["category"]))
 
@@ -351,7 +375,8 @@ def _section_recommend() -> None:
                 for w in combo["warnings"]:
                     st.warning(w, icon="⚠️")
 
-                if st.button("✅ 采用此套餐", key=f"adopt_{recipes[0]['id']}", use_container_width=True):
+                if st.button("✅ 采用此套餐（替换当前菜单）", key=f"adopt_{ci}",
+                             use_container_width=True):
                     st.session_state[_RIDS]    = [r["id"] for r in recipes]
                     st.session_state[_CONFIRM] = False
                     st.session_state[_COMBOS]  = None
@@ -412,8 +437,11 @@ def _print_control_center() -> None:
         # ── Fruit ────────────────────────────────────────────
         st.markdown("**🍎 今日水果（每种 60–70g）**")
         fc1, fc2 = st.columns([4, 1])
-        fc1.multiselect("今日水果", _FRUITS_LIST, default=["苹果", "香蕉", "蓝莓"],
-                        key="fd_fruits", label_visibility="collapsed")
+        fc1.multiselect("今日水果", get_fruits_list(), default=["苹果", "香蕉", "蓝莓"],
+                        key="fd_fruits", label_visibility="collapsed",
+                        accept_new_options=True,
+                        placeholder="选择或直接输入新水果（会被记住）")
+        remember_new_fruits(st.session_state.get("fd_fruits"))
         fc2.number_input("每种(g)", min_value=30, max_value=200, value=65, step=5,
                          key="fd_fruit_g")
 

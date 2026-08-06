@@ -11,7 +11,9 @@ import pandas as pd
 
 from db.init_db import get_connection
 from db.daily_log import save_daily_log, get_recent_logs, get_recent_logs_full
-from db.nutrition import get_all_cached_names, invalidate_cache, update_cached_nutrients
+from db.nutrition import (
+    get_all_cached_names, get_cached, invalidate_cache, update_cached_nutrients,
+)
 from db.recipes import get_ingredients, get_recipe
 from utils.cache import get_all_recipes_cached as get_all_recipes
 from utils.nutrition_lookup import (
@@ -20,13 +22,52 @@ from utils.nutrition_lookup import (
 )
 
 # ── Daily Reference Intake — per person / day ─────────────────
+# FDA Daily Values, which are all defined against a 2000 kcal reference diet.
+_DRI_REFERENCE_KCAL = 2000.0
+
+# Share of daily energy per macro, editable on the ⚙️ 设置 page. Defaults sit
+# inside the AMDR bands (protein 10–35%, fat 20–35%, carbs 45–65%) and are
+# weighted toward protein: at a calorie deficit, higher protein preserves lean
+# mass. kcal/g: protein 4, fat 9, carbs 4.
+_MACRO_DEFAULTS = {"protein": 25.0, "fat": 30.0, "carbs": 45.0}
+_MACRO_KCAL_PER_G = {"protein": 4.0, "fat": 9.0, "carbs": 4.0}
+_MACRO_KEYS = ("protein", "fat", "carbs")
+# AHA guidance: saturated fat under 10% of daily energy (7% for heart health).
+_SATFAT_ENERGY_LIMIT = 0.10
+
+
+def get_macro_split() -> dict:
+    """Macro energy shares (%) from user_settings, falling back to defaults."""
+    try:
+        conn = get_connection()
+        rows = {r["key"]: r["value"] for r in conn.execute(
+            "SELECT key, value FROM user_settings WHERE key LIKE 'macro_pct_%'"
+        ).fetchall()}
+        conn.close()
+        split = {k: float(rows.get(f"macro_pct_{k}", _MACRO_DEFAULTS[k])) for k in _MACRO_KEYS}
+        return split if abs(sum(split.values()) - 100.0) < 0.5 else dict(_MACRO_DEFAULTS)
+    except Exception:
+        return dict(_MACRO_DEFAULTS)
+
+
+def save_macro_split(protein_pct: float, fat_pct: float, carbs_pct: float) -> None:
+    conn = get_connection()
+    try:
+        for k, v in (("protein", protein_pct), ("fat", fat_pct), ("carbs", carbs_pct)):
+            conn.execute("INSERT OR REPLACE INTO user_settings (key, value) VALUES (?, ?)",
+                         (f"macro_pct_{k}", str(float(v))))
+        conn.commit()
+    finally:
+        conn.close()
+
 _DRI = {
-    "kcal":       2000.0,   # kcal
+    "kcal":       2000.0,   # kcal — generic default; per-user value comes from
+                            # user_settings.target_kcal_per_day via _dri()
     "protein":      50.0,   # g   (overridden by user weight × multiplier)
-    "fat":          65.0,   # g
-    "carbs":       300.0,   # g
+    "fat":          65.0,   # g   = 29% of 2000 kcal — scaled with the target
+    "carbs":       300.0,   # g   = 60% of 2000 kcal — scaled with the target
     "sodium":     2300.0,   # mg  (upper limit — not a target)
-    "fiber":        25.0,   # g
+    "fiber":        25.0,   # g   (adult female recommendation, not energy-scaled)
     "vitc":         90.0,   # mg
     "iron":         10.0,   # mg
     "calcium":    1000.0,   # mg
@@ -42,6 +83,73 @@ _SODIUM_LIMIT_PER_PERSON = 2300.0   # mg — red alert
 
 
 # ── Helpers ───────────────────────────────────────────────────
+
+_SUPPLEMENTS_KEY = "daily_supplements"
+
+
+def get_supplements() -> dict:
+    """Nutrients taken as a daily supplement, added to every day's total.
+
+    Some nutrients are impractical to hit from food alone (vitamin D especially),
+    so without this the DRI bars stay permanently red and stop being informative.
+    Stored as {nutrient_key: amount_per_day} in the same units as the DRI table.
+    """
+    try:
+        conn = get_connection()
+        row = conn.execute("SELECT value FROM user_settings WHERE key=?",
+                           (_SUPPLEMENTS_KEY,)).fetchone()
+        conn.close()
+        return json.loads(row["value"]) if row and row["value"] else {}
+    except Exception:
+        return {}
+
+
+def save_supplements(data: dict) -> None:
+    conn = get_connection()
+    try:
+        conn.execute("INSERT OR REPLACE INTO user_settings (key, value) VALUES (?, ?)",
+                     (_SUPPLEMENTS_KEY, json.dumps(data, ensure_ascii=False)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_kcal_target() -> float:
+    """Per-person daily calorie target from user_settings.
+
+    `target_kcal_per_day` has existed in the seed data since the beginning but
+    nothing ever read it — every DRI bar was scored against the hardcoded 2000,
+    so the "% 达标" figure ignored the user's actual target entirely.
+    """
+    try:
+        conn = get_connection()
+        row = conn.execute("SELECT value FROM user_settings WHERE key=?",
+                           ("target_kcal_per_day",)).fetchone()
+        conn.close()
+        return float(row["value"]) if row and row["value"] else _DRI["kcal"]
+    except Exception:
+        return _DRI["kcal"]
+
+
+def _dri() -> dict:
+    """DRI targets derived from the user's calorie goal and body weight.
+
+    The three macros come from the configured energy split, so they always add
+    up to exactly the calorie target. The FDA label values can't be used as-is:
+    they assume 60/29/10 (carb/fat/protein), which both overshoots carbs and
+    badly undershoots protein for anyone active.
+
+    Vitamins, minerals and the sodium ceiling are absolute amounts and don't
+    scale with how much you eat.
+    """
+    d = dict(_DRI)
+    kcal = get_kcal_target()
+    d["kcal"] = kcal
+    for k, pct in get_macro_split().items():
+        d[k] = kcal * (pct / 100.0) / _MACRO_KCAL_PER_G[k]
+    d["satfat"] = kcal * _SATFAT_ENERGY_LIMIT / 9.0   # ceiling, not a goal
+    return d
+
 
 def _protein_target() -> tuple:
     """Return (min_g, max_g) combined protein target for 2 people."""
@@ -101,6 +209,105 @@ def _bar(label: str, value: float, dri_1p: float, unit: str,
     vc.caption(f"{pct_disp:.0f}% DRI/人")
 
 
+# Editable nutrient fields: update_cached_nutrients() key → (DB column, label).
+_FIX_FIELDS = [
+    ("kcal", "kcal_per_100g", "热量 kcal"),      ("protein", "protein_per_100g", "蛋白质 g"),
+    ("fat", "fat_per_100g", "脂肪 g"),           ("carbs", "carbs_per_100g", "碳水 g"),
+    ("sodium", "sodium_per_100g", "钠 mg"),      ("fiber", "fiber_per_100g", "纤维 g"),
+    ("vitc", "vitc_per_100g", "维C mg"),         ("iron", "iron_per_100g", "铁 mg"),
+    ("calcium", "calcium_per_100g", "钙 mg"),    ("potassium", "potassium_per_100g", "钾 mg"),
+    ("vitd", "vitd_per_100g", "维D µg"),         ("vita", "vita_per_100g", "维A µg"),
+    ("magnesium", "magnesium_per_100g", "镁 mg"),("zinc", "zinc_per_100g", "锌 mg"),
+    ("satfat", "satfat_per_100g", "饱和脂肪 g"),
+    ("monofat", "monofat_per_100g", "单不饱和 g"),
+    ("polyfat", "polyfat_per_100g", "多不饱和 g"),
+]
+
+
+def ingredient_fix_form(names: list, key_prefix: str) -> None:
+    """Fix one ingredient's cached nutrition, right where you spotted the problem.
+
+    The 食材营养缓存库 table is a virtualised data_editor: only the visible rows
+    exist in the DOM, so Chrome's Ctrl+F can't find anything and hunting a row
+    among ~660 is painful. This form takes the handful of ingredients actually on
+    screen and edits one of them directly. Values are per 100g, matching the cache.
+    """
+    names = sorted({n for n in names if n and n not in ("—", "")})
+    if not names:
+        return
+
+    with st.expander("✏️ 修正某个食材的营养数据（每 100g）", expanded=False):
+        sel = st.selectbox("食材", names, key=f"{key_prefix}_sel")
+        row = get_cached(sel)
+        if not row:
+            st.info(f"「{sel}」还不在缓存里——先在「🗄️ 食材营养库 → 🔍 食材查询」查询一次，"
+                    "或用该页的「⚡ AI 录入营养数据」补上，之后就能在这里修正。")
+            return
+
+        st.caption(f"来源：`{row['source']}`　·　保存后来源标记变为 `manual`")
+        en = st.text_input("英文名（可选）", value=row["en_name"] or "",
+                           key=f"{key_prefix}_en")
+
+        vals = {}
+        cols = st.columns(4)
+        for i, (key, db_col, label) in enumerate(_FIX_FIELDS):
+            cur = row[db_col]
+            vals[key] = cols[i % 4].number_input(
+                label, value=float(cur) if cur is not None else 0.0,
+                step=0.1, format="%.1f", key=f"{key_prefix}_{key}",
+            )
+
+        if st.button("💾 保存修正", type="primary", key=f"{key_prefix}_save"):
+            changed = {}
+            for key, db_col, _ in _FIX_FIELDS:
+                cur, new = row[db_col], vals[key]
+                if cur is None:
+                    if new != 0.0:            # 0 on an empty field = still empty
+                        changed[key] = new
+                elif abs(float(cur) - new) > 1e-9:
+                    changed[key] = new
+            if (en or "").strip() != (row["en_name"] or ""):
+                changed["en_name"] = en.strip() or None
+            if not changed:
+                st.info("没有检测到改动")
+            else:
+                update_cached_nutrients(sel, changed)
+                st.success(f"✅ 已更新「{sel}」的 {len(changed)} 个字段，下次计算即生效")
+                st.rerun()
+
+
+def _render_fat_breakdown(fat: float, sat: float, mono: float, poly: float,
+                          detailed: float, dri: dict, scope: str = "本餐") -> None:
+    """Saturated / mono / poly split, stated with how much of the fat it covers.
+
+    Most cached ingredients came from local_nutrition.json, which has no fat
+    breakdown, so a bare "饱和 3g" would look like a complete figure when it may
+    describe a small slice of the fat. The coverage % keeps that honest.
+    All arguments are already per-person.
+    """
+    if fat <= 0:
+        return
+    coverage = detailed / fat if fat else 0.0
+    if coverage <= 0:
+        st.caption(f"🔬 脂肪细分：{scope}食材暂无饱和/不饱和数据"
+                   "（可在「🗄️ 食材库」用 ⚡ AI 录入补齐）")
+        return
+
+    sat_limit = dri["kcal"] * _SATFAT_ENERGY_LIMIT / 9.0
+    flag = "🚨" if sat > sat_limit else ("⚠️" if sat > sat_limit * 0.8 else "")
+    st.caption(
+        f"🔬 其中：饱和 **{sat:.1f} g**{flag} · 单不饱和 {mono:.1f} g · 多不饱和 {poly:.1f} g"
+        f"　｜　饱和脂肪日上限约 {sat_limit:.0f} g"
+    )
+    if coverage < 0.95:
+        st.caption(f"　　⚠️ 只有 {coverage*100:.0f}% 的脂肪有细分数据，实际饱和脂肪应高于上面的数字")
+
+
+def _fat_breakdown(nutr: MealNutrition, pp: float, dri: dict) -> None:
+    _render_fat_breakdown(nutr.fat / pp, nutr.satfat / pp, nutr.monofat / pp,
+                          nutr.polyfat / pp, nutr.fat_detailed / pp, dri)
+
+
 def _results(nutr: MealNutrition, breakdown: list) -> None:
     """Render complete nutrition results panel (all values per-person)."""
     p_min, p_max = _protein_target()
@@ -150,31 +357,35 @@ def _results(nutr: MealNutrition, breakdown: list) -> None:
     # Macro bars
     st.subheader("Macros（每人 / 晚餐）")
     st.caption("与每人每日 DRI 对比（晚餐理想约 35–40%）")
-    _bar("热量",   kcal_pp,  _DRI["kcal"],    "kcal")
-    # 【修复】使用动态算出的单人蛋白质最低目标 p_min_pp
-    _bar("蛋白质", prot_pp,  p_min_pp,        "g")
-    _bar("脂肪",   fat_pp,   _DRI["fat"],     "g")
-    _bar("碳水",   carbs_pp, _DRI["carbs"],   "g")
+    dri = _dri()
+    # All four bars share one source of truth, otherwise the protein bar (body
+    # weight based) and the carb/fat bars (energy-share based) disagree about
+    # what 100% means and can't all be satisfied at the calorie target.
+    _bar("热量",   kcal_pp,  dri["kcal"],    "kcal")
+    _bar("蛋白质", prot_pp,  dri["protein"], "g")
+    _bar("脂肪",   fat_pp,   dri["fat"],     "g")
+    _bar("碳水",   carbs_pp, dri["carbs"],   "g")
+    _fat_breakdown(nutr, pp, dri)
 
     st.divider()
 
     # Micro bars
     st.subheader("Micros（每人 / 晚餐）")
-    _bar("钠",     sodium_pp, _DRI["sodium"],    "mg", warn_over=True)
+    _bar("钠",     sodium_pp, dri["sodium"],    "mg", warn_over=True)
     if sodium_pp > _SODIUM_LIMIT_PER_PERSON:
         st.error(f"🚨 钠严重超标：每人 {sodium_pp:.0f}mg，超过全天上限 {_SODIUM_LIMIT_PER_PERSON:.0f}mg！建议减少调料用量或调整菜谱调料摄入比例。")
     elif sodium_pp > _SODIUM_WARN_PER_PERSON:
         st.warning(f"⚠️ 钠偏高：每人 {sodium_pp:.0f}mg，叠加早午餐可能超出全天上限。")
 
-    _bar("膳食纤维", fiber_pp, _DRI["fiber"],     "g")
-    _bar("维生素C",  vitc_pp,  _DRI["vitc"],      "mg")
-    _bar("铁",       iron_pp,  _DRI["iron"],      "mg")
-    _bar("钙",       cal_pp,   _DRI["calcium"],   "mg")
-    _bar("钾",       pot_pp,   _DRI["potassium"], "mg")
-    _bar("维生素D",  vitd_pp,  _DRI["vitd"],      "µg")
-    _bar("维生素A",  vita_pp,  _DRI["vita"],      "µg")
-    _bar("镁",       mag_pp,   _DRI["magnesium"], "mg")
-    _bar("锌",       zinc_pp,  _DRI["zinc"],      "mg")
+    _bar("膳食纤维", fiber_pp, dri["fiber"],     "g")
+    _bar("维生素C",  vitc_pp,  dri["vitc"],      "mg")
+    _bar("铁",       iron_pp,  dri["iron"],      "mg")
+    _bar("钙",       cal_pp,   dri["calcium"],   "mg")
+    _bar("钾",       pot_pp,   dri["potassium"], "mg")
+    _bar("维生素D",  vitd_pp,  dri["vitd"],      "µg")
+    _bar("维生素A",  vita_pp,  dri["vita"],      "µg")
+    _bar("镁",       mag_pp,   dri["magnesium"], "mg")
+    _bar("锌",       zinc_pp,  dri["zinc"],      "mg")
 
     # Ingredient breakdown
     st.divider()
@@ -186,6 +397,7 @@ def _results(nutr: MealNutrition, breakdown: list) -> None:
                 use_container_width=True,
                 hide_index=True,
             )
+            ingredient_fix_form([r["食材"] for r in breakdown], "fixfd")
 
 
 # ── Tab 1: 菜谱营养计算 ───────────────────────────────────────
@@ -383,6 +595,9 @@ _COL_TO_KEY = {
     "vita_per_100g":      "vita",
     "magnesium_per_100g": "magnesium",
     "zinc_per_100g":      "zinc",
+    "satfat_per_100g":    "satfat",
+    "monofat_per_100g":   "monofat",
+    "polyfat_per_100g":   "polyfat",
     "en_name":            "en_name",
 }
 
@@ -404,6 +619,9 @@ _COL_LABELS = {
     "vita_per_100g":      "维A(µg)",
     "magnesium_per_100g": "镁(mg)",
     "zinc_per_100g":      "锌(mg)",
+    "satfat_per_100g":    "饱和脂肪(g)",
+    "monofat_per_100g":   "单不饱和(g)",
+    "polyfat_per_100g":   "多不饱和(g)",
 }
 
 
@@ -421,7 +639,8 @@ def _sync_local_to_cache() -> int:
     cached = set(get_all_cached_names())
     count = 0
     _fields = ["kcal", "protein", "fat", "carbs", "sodium", "fiber",
-               "vitc", "iron", "calcium", "potassium", "vitd", "vita", "magnesium", "zinc"]
+               "vitc", "iron", "calcium", "potassium", "vitd", "vita", "magnesium", "zinc",
+               "satfat", "monofat", "polyfat"]
     for name, entry in local.items():
         if name.startswith("_") or name in cached:
             continue
@@ -439,7 +658,8 @@ def _sync_local_to_cache() -> int:
 
 _NUTR_FIELDS = ["kcal", "protein", "fat", "carbs", "sodium", "fiber",
                 "vitc", "iron", "calcium", "potassium",
-                "vitd", "vita", "magnesium", "zinc"]
+                "vitd", "vita", "magnesium", "zinc",
+                "satfat", "monofat", "polyfat"]
 
 
 def _ai_query_nutrition(raw_input: str, use_grounding: bool = True) -> list:
@@ -488,10 +708,12 @@ def _ai_query_nutrition(raw_input: str, use_grounding: bool = True) -> list:
   "sodium": 数值, "fiber": 数值,
   "vitc": 数值, "iron": 数值, "calcium": 数值, "potassium": 数值,
   "vitd": 数值, "vita": 数值, "magnesium": 数值, "zinc": 数值,
+  "satfat": 数值, "monofat": 数值, "polyfat": 数值,
   "source_note": "数据来源说明（如 USDA FDC 170069 / 中国食物成分表第6版 / 解析自原文）"
 }}
 
-单位：protein/fat/carbs/fiber=g, sodium/vitc/iron/calcium/potassium/magnesium/zinc=mg, vitd/vita=µg, kcal=kcal。
+satfat/monofat/polyfat = 饱和/单不饱和/多不饱和脂肪，三者之和应 ≈ fat；确实查不到就填 null，不要猜 0。
+单位：protein/fat/carbs/fiber/satfat/monofat/polyfat=g, sodium/vitc/iron/calcium/potassium/magnesium/zinc=mg, vitd/vita=µg, kcal=kcal。
 只返回 JSON 数组，不要任何解释文字或 markdown 包裹。
 """
     client = genai.Client(api_key=api_key)
@@ -631,9 +853,126 @@ def _ai_nutrition_expander() -> None:
             st.rerun()
 
 
+def _nutrition_gaps() -> tuple:
+    """Recipe ingredients whose nutrition lookup yields nothing usable.
+
+    Two distinct failure modes, both of which silently understate a meal:
+      A. 未收录 — no row in nutrition_cache and no local_nutrition.json entry, so
+         lookup_ingredient() returns None and the ingredient is dropped entirely.
+      B. 空壳记录 — a cache row exists but kcal/protein/fat/carbs are all 0/NULL,
+         so it contributes exactly nothing while *looking* like it resolved.
+         Sodium is checked too: 盐/小苏打 legitimately have zero macros but real
+         sodium, and flagging those as broken would be noise.
+
+    Each is returned with the number of recipes affected, so the list can be
+    worked through by actual impact instead of alphabetically.
+    """
+    conn = get_connection()
+    try:
+        used = conn.execute(
+            "SELECT name, is_condiment, COUNT(DISTINCT recipe_id) AS n "
+            "FROM ingredients GROUP BY name, is_condiment"
+        ).fetchall()
+        cached = {r["ingredient_name"] for r in
+                  conn.execute("SELECT ingredient_name FROM nutrition_cache")}
+        hollow = {r["ingredient_name"] for r in conn.execute(
+            "SELECT ingredient_name FROM nutrition_cache "
+            "WHERE COALESCE(kcal_per_100g,0)=0 AND COALESCE(protein_per_100g,0)=0 "
+            "  AND COALESCE(fat_per_100g,0)=0 AND COALESCE(carbs_per_100g,0)=0 "
+            "  AND COALESCE(sodium_per_100g,0)=0"
+        )}
+    finally:
+        conn.close()
+
+    from utils.nutrition_lookup import _load_local
+    # `_` keys are comments in that JSON, not ingredients.
+    local = {k for k in _load_local() if not k.startswith("_")}
+    have = cached | local
+
+    absent, empty = [], []
+    for r in used:
+        item = {"name": r["name"], "recipes": r["n"], "condiment": bool(r["is_condiment"])}
+        if r["name"] not in have:
+            absent.append(item)
+        elif r["name"] in hollow:
+            # Flagged regardless of local_nutrition.json: the SQLite cache is
+            # tier 1 and shadows it, so a hollow cache row wins even when the
+            # JSON holds good values (the 牛排 bug). Excluding "it's in local
+            # too" would hide exactly that case.
+            empty.append(item)
+
+    key = lambda x: (x["condiment"], -x["recipes"], x["name"])
+    return sorted(absent, key=key), sorted(empty, key=key)
+
+
+# Zero calories here is correct, not a data gap. Exact names only — a suffix rule
+# like "ends with 水" would also swallow 糖水/汽水, where a 0 really is an error.
+_ZERO_IS_FINE = {
+    "水", "清水", "冷水", "开水", "热水", "温水", "冰水", "凉水", "纯净水",
+    "饮用水", "泡发用水", "葱姜水", "泡椒水", "适量清水", "适量水", "冰块",
+}
+# Recipe-import artefacts that aren't ingredients at all (CLAUDE.md 已知问题 1).
+_JUNK_PREFIXES = ("步骤", "详见", "比例", "见步骤", "以上", "备注")
+
+
+def _is_noise(name: str) -> bool:
+    return name in _ZERO_IS_FINE or name.startswith(_JUNK_PREFIXES)
+
+
+def _gap_section(title: str, items: list, note: str) -> None:
+    if not items:
+        st.success(f"✅ {title}：没有问题")
+        return
+    mains = [i for i in items if not i["condiment"]]
+    conds = [i for i in items if i["condiment"]]
+    st.markdown(f"**{title}**　共 {len(items)} 种（主料 {len(mains)} · 调料 {len(conds)}）")
+    st.caption(note)
+    for group, label in ((mains, "主料"), (conds, "调料")):
+        if not group:
+            continue
+        st.caption(f"— {label} —")
+        st.dataframe(
+            [{"食材": i["name"], "被几道菜使用": i["recipes"]} for i in group],
+            use_container_width=True, hide_index=True,
+        )
+    st.caption("复制下面这行，粘到上方「⚡ AI 录入营养数据」即可批量补齐：")
+    st.code("、".join(i["name"] for i in mains) or "（无主料需补）", language=None)
+
+
 def _tab_food_library() -> None:
     st.subheader("本地食材营养缓存库")
     _ai_nutrition_expander()
+
+    with st.expander("🩺 营养数据体检：哪些食材没有营养数据", expanded=False):
+        st.caption(
+            "菜谱里用到、但查不到营养数据的食材会被**静默跳过**——菜看着算出来了，"
+            "实际热量和蛋白质都偏低。按「被几道菜使用」排序，先补影响大的。"
+        )
+        absent, empty = _nutrition_gaps()
+        hide = st.checkbox(
+            "隐藏水类和非食材条目", value=True, key="gap_hide_noise",
+            help="水/开水这类零卡是正确的；「步骤1」「详见步骤」是菜谱导入时混进来的文本，"
+                 "不是真食材。取消勾选可看到完整列表。",
+        )
+        if hide:
+            n_before = len(absent) + len(empty)
+            absent = [i for i in absent if not _is_noise(i["name"])]
+            empty  = [i for i in empty  if not _is_noise(i["name"])]
+            n_hidden = n_before - len(absent) - len(empty)
+            if n_hidden:
+                st.caption(f"已隐藏 {n_hidden} 条水类/非食材条目")
+
+        _gap_section(
+            "① 完全未收录", absent,
+            "缓存和 local_nutrition.json 里都没有 → 计算时整个食材被忽略。",
+        )
+        st.divider()
+        _gap_section(
+            "② 有记录但是空壳", empty,
+            "缓存里有这一条，但热量/蛋白/脂肪/碳水全是 0（且钠也为 0）→ 看起来匹配上了，"
+            "实际按 0 计入。盐、小苏打这类本身零卡但含钠的不会出现在这里。",
+        )
+
     st.divider()
 
     sc1, sc2 = st.columns([3, 1])
@@ -661,6 +1000,21 @@ def _tab_food_library() -> None:
         return
 
     orig_df = pd.DataFrame([dict(r) for r in rows])
+
+    # The data_editor below is virtualised — only visible rows are in the DOM, so
+    # Chrome's Ctrl+F finds nothing. This filter is the way to locate a row.
+    q = st.text_input("🔍 按食材名筛选", key="food_lib_filter",
+                      placeholder="输入食材名的一部分，如「牛」「番茄」")
+    if q.strip():
+        orig_df = orig_df[orig_df["ingredient_name"].str.contains(q.strip(), na=False)]
+        st.caption(f"匹配 **{len(orig_df)}** 条")
+        if orig_df.empty:
+            st.info("没有匹配的食材")
+            return
+        orig_df = orig_df.reset_index(drop=True)
+    else:
+        st.caption(f"共 **{len(orig_df)}** 条（表格无法用浏览器搜索，请用上方筛选框定位）")
+
     display_df = orig_df.rename(columns=_COL_LABELS)
 
     edited_df = st.data_editor(
@@ -713,46 +1067,95 @@ def _tab_food_library() -> None:
 
 # ── Tab 4: 全日营养 (Phase 7) ─────────────────────────────────
 
-_FRUITS_LIST = [
+_FRUITS_BASE = [
     "苹果", "香蕉", "橙子", "草莓", "葡萄", "蓝莓", "猕猴桃", "西瓜",
     "芒果", "菠萝", "桃子", "樱桃", "梨", "火龙果", "哈密瓜",
-    "荔枝", "柚子", "覆盆子", "无花果","黑莓","香瓜"
+    "荔枝", "柚子", "黑莓", "香瓜",
 ]
+_CUSTOM_FRUITS_KEY = "custom_fruits"
+
+
+def _load_custom_fruits() -> list:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT value FROM user_settings WHERE key=?",
+                           (_CUSTOM_FRUITS_KEY,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return []
+    try:
+        return json.loads(row["value"])
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def get_fruits_list() -> list:
+    """Built-in fruits plus any the user typed in, so additions survive restarts.
+    `accept_new_options` alone would only keep a new fruit for that one session."""
+    return _FRUITS_BASE + [f for f in _load_custom_fruits() if f not in _FRUITS_BASE]
+
+
+def remember_new_fruits(selected: list) -> None:
+    """Persist fruits typed straight into the multiselect."""
+    known = set(get_fruits_list())
+    new = [f for f in (selected or []) if f and f not in known]
+    if not new:
+        return
+    custom = _load_custom_fruits() + new
+    conn = get_connection()
+    try:
+        conn.execute("INSERT OR REPLACE INTO user_settings (key, value) VALUES (?, ?)",
+                     (_CUSTOM_FRUITS_KEY, json.dumps(custom, ensure_ascii=False)))
+        conn.commit()
+    finally:
+        conn.close()
 
 # Per-person fixed nutrition — default breakfast (PRD estimate)
-_BFST_BASE = dict(
-    kcal=580, protein=33.5, fat=18, carbs=77,
-    sodium=160, fiber=18.3, vitc=8, iron=4,
-    calcium=350, potassium=1000, vitd=1.5, vita=60,
-    magnesium=80, zinc=3,
-)
+# Default breakfast/lunch as real ingredient lists rather than a hardcoded
+# nutrient dict. The old dict was a rough PRD-era estimate and its micronutrients
+# were badly wrong — vitA 60µg against an actual ~640µg (南瓜+红薯 are dense
+# β-carotene sources) and magnesium 80mg against ~270mg (火麻仁 alone is
+# 700mg/100g). That single dict was the main reason 维A/镁 looked permanently
+# deficient on the DRI heatmap. Going through lookup_ingredient() instead means
+# these track the ingredient database as it improves, and show up in 食材明细.
+_BFST_INGS = [
+    {"name": "干杂豆",   "amount": 35,  "unit": "g", "intake_ratio": 1.0},
+    {"name": "钢切燕麦", "amount": 25,  "unit": "g", "intake_ratio": 1.0},
+    {"name": "三色藜麦", "amount": 15,  "unit": "g", "intake_ratio": 1.0},
+    {"name": "南瓜",     "amount": 40,  "unit": "g", "intake_ratio": 1.0},
+    {"name": "红薯",     "amount": 40,  "unit": "g", "intake_ratio": 1.0},
+    {"name": "奇亚籽",   "amount": 7.5, "unit": "g", "intake_ratio": 1.0},
+    {"name": "火麻仁",   "amount": 7.5, "unit": "g", "intake_ratio": 1.0},
+    {"name": "燕麦麸皮", "amount": 10,  "unit": "g", "intake_ratio": 1.0},
+    {"name": "鸡蛋",     "amount": 60,  "unit": "g", "intake_ratio": 1.0},
+    {"name": "牛奶",     "amount": 150, "unit": "g", "intake_ratio": 1.0},
+    {"name": "黑咖啡",   "amount": 240, "unit": "g", "intake_ratio": 1.0},
+]
 _BFST_DETAIL = [
-    "杂粮粥：干杂豆 35g · 钢切燕麦 25g · 三色藜麦 15g · 块茎 80g · 混合种子 15g · 燕麦麸皮 10g",
+    "杂粮粥：干杂豆 35g · 钢切燕麦 25g · 三色藜麦 15g · 南瓜 40g · 红薯 40g · 奇亚籽 7.5g · 火麻仁 7.5g · 燕麦麸皮 10g",
     "水煮鸡蛋（大）1 个 ~60g",
     "欧蕾：黑咖啡 240ml + 2% 超滤牛奶 150ml",
 ]
 
-# Per-person fixed nutrition — default lunch (PRD estimate)
-_LUNCH_BASE = dict(
-    kcal=250, protein=18, fat=14, carbs=14,
-    sodium=140, fiber=3.5, vitc=0, iron=0.5,
-    calcium=400, potassium=500, vitd=2.0, vita=0,
-    magnesium=30, zinc=1,
-)
+_LUNCH_INGS = [
+    {"name": "牛奶",       "amount": 300, "unit": "g", "intake_ratio": 1.0},
+    {"name": "可可粉",     "amount": 10,  "unit": "g", "intake_ratio": 1.0},
+    {"name": "混合坚果",   "amount": 10,  "unit": "g", "intake_ratio": 1.0},
+]
 _LUNCH_DETAIL = [
     "高蛋白可可饮：2% 超滤牛奶 300ml + 未碱化可可粉 10g",
     "混合坚果 10g",
 ]
 
-# Simplified ingredient name lists for default-meal diversity tracking
-_BFST_DEFAULT_ING_NAMES = [
-    "杂粮豆", "燕麦", "藜麦", "块茎蔬菜", "混合种子", "燕麦麸皮", "鸡蛋", "牛奶",
-]
-_LUNCH_DEFAULT_ING_NAMES = ["牛奶", "可可粉", "混合坚果"]
-
 _NUTR_KEYS = [
     "kcal", "protein", "fat", "carbs", "sodium", "fiber",
     "vitc", "iron", "calcium", "potassium", "vitd", "vita", "magnesium", "zinc",
+    # Fat breakdown. `fat_detailed` is not a nutrient — it's how many grams of
+    # the total fat came from ingredients that actually have a breakdown, so the
+    # UI can say how complete the saturated-fat figure is instead of implying
+    # it covers the whole meal.
+    "satfat", "monofat", "polyfat", "fat_detailed",
 ]
 
 
@@ -766,16 +1169,22 @@ def _add_nutr(*sources) -> dict:
     return total
 
 
-def _meal_card(title: str, base: dict, detail_lines: list) -> None:
+def _meal_card(title: str, ings: list, detail_lines: list) -> None:
+    """Default-meal summary, computed from the ingredient list like every other
+    meal — no separate hardcoded numbers that can drift from the real data."""
+    n, _ = calc_nutrition_with_breakdown(ings)
     with st.expander(title, expanded=False):
         for line in detail_lines:
             st.caption(f"• {line}")
+        if n.missing:
+            st.warning(f"⚠️ 未查到营养数据（按 0 计）：{'、'.join(n.missing)}")
     c = st.columns(4)
-    c[0].metric("热量",   f"{base['kcal']:.0f} kcal")
-    c[1].metric("蛋白质", f"{base['protein']:.1f} g")
-    c[2].metric("脂肪",   f"{base['fat']:.1f} g")
-    c[3].metric("碳水",   f"{base['carbs']:.1f} g")
-    st.caption(f"钠 {base['sodium']:.0f} mg · 纤维 {base['fiber']:.1f} g")
+    c[0].metric("热量",   f"{n.kcal:.0f} kcal")
+    c[1].metric("蛋白质", f"{n.protein:.1f} g")
+    c[2].metric("脂肪",   f"{n.fat:.1f} g")
+    c[3].metric("碳水",   f"{n.carbs:.1f} g")
+    st.caption(f"钠 {n.sodium:.0f} mg · 纤维 {n.fiber:.1f} g · "
+               f"镁 {n.magnesium:.0f} mg · 维A {n.vita:.0f} µg")
 
 
 # ── 备餐控制台 cross-page persistence ─────────────────────────
@@ -842,7 +1251,9 @@ def compute_fullday_silent() -> dict:
         bfst_n     = {k: getattr(bn, k, 0.0) for k in _NUTR_KEYS}
         bfst_names = [i["name"] for i in bfst_custom_ings]
     else:
-        bfst_n, bfst_names = dict(_BFST_BASE), list(_BFST_DEFAULT_ING_NAMES)
+        bn, _ = calc_nutrition_with_breakdown(_BFST_INGS)
+        bfst_n     = {k: getattr(bn, k, 0.0) for k in _NUTR_KEYS}
+        bfst_names = [i["name"] for i in _BFST_INGS]
 
     # ── Lunch ─────────────────────────────────────────────────
     lunch_custom_ings = []
@@ -854,7 +1265,9 @@ def compute_fullday_silent() -> dict:
         lunch_n     = {k: getattr(ln, k, 0.0) for k in _NUTR_KEYS}
         lunch_names = [i["name"] for i in lunch_custom_ings]
     else:
-        lunch_n, lunch_names = dict(_LUNCH_BASE), list(_LUNCH_DEFAULT_ING_NAMES)
+        ln, _ = calc_nutrition_with_breakdown(_LUNCH_INGS)
+        lunch_n     = {k: getattr(ln, k, 0.0) for k in _NUTR_KEYS}
+        lunch_names = [i["name"] for i in _LUNCH_INGS]
 
     # ── Fruit ─────────────────────────────────────────────────
     fruit_n = dict(zero)
@@ -909,10 +1322,15 @@ def compute_fullday_silent() -> dict:
         staple_names = [i["name"] for i in staple_ings]
 
     total    = _add_nutr(bfst_n, fruit_n, lunch_n, dinner_n, staple_n)
+    # Daily supplements land on top of everything eaten (see get_supplements).
+    supp = get_supplements()
+    for k, v in supp.items():
+        if k in total:
+            total[k] = total[k] + float(v or 0)
     snapshot = list(dict.fromkeys(bfst_names + sel_fruits + lunch_names + dinner_names + staple_names))
 
     return {
-        "total": total, "bfst": bfst_n, "fruit": fruit_n,
+        "total": total, "supplements": supp, "bfst": bfst_n, "fruit": fruit_n,
         "lunch": lunch_n, "dinner": dinner_n, "staple": staple_n,
         "bfst_skip": bfst_skip, "lunch_skip": lunch_skip,
         "bfst_custom_ings": bfst_custom_ings, "lunch_custom_ings": lunch_custom_ings,
@@ -969,7 +1387,7 @@ def _tab_fullday() -> None:
     st.subheader("🌅 早餐")
     bfst_skip = st.toggle("今日不在家吃早饭", key="fd_bfst_skip")
     if not bfst_skip:
-        _meal_card("食材明细（杂粮粥 + 鸡蛋 + 欧蕾）", _BFST_BASE, _BFST_DETAIL)
+        _meal_card("食材明细（杂粮粥 + 鸡蛋 + 欧蕾）", _BFST_INGS, _BFST_DETAIL)
         with st.expander("✏️ 特殊情况：自定义食材（覆盖默认值）"):
             st.caption("每行 `食材名  数量  单位`，留空则使用默认估算值")
             st.text_area("早餐食材", height=90, key="fd_bfst_custom_txt",
@@ -980,15 +1398,18 @@ def _tab_fullday() -> None:
     st.subheader("🍎 今日水果")
     st.caption("每日 2–3 种，每种约 60–70g")
     c1, c2 = st.columns([4, 1])
-    c1.multiselect("今日水果", _FRUITS_LIST, default=["苹果", "香蕉", "蓝莓"],
-                   key="fd_fruits", label_visibility="collapsed")
+    c1.multiselect("今日水果", get_fruits_list(), default=["苹果", "香蕉", "蓝莓"],
+                   key="fd_fruits", label_visibility="collapsed",
+                   accept_new_options=True,
+                   placeholder="选择或直接输入新水果（会被记住）")
     c2.number_input("每种(g)", min_value=30, max_value=200, value=65, step=5, key="fd_fruit_g")
+    remember_new_fruits(st.session_state.get("fd_fruits"))
 
     # ── Lunch ─────────────────────────────────────────────────
     st.subheader("🕛 午餐")
     lunch_skip = st.toggle("今日不在家吃午饭", key="fd_lunch_skip")
     if not lunch_skip:
-        _meal_card("食材明细（高蛋白可可饮 + 坚果）", _LUNCH_BASE, _LUNCH_DETAIL)
+        _meal_card("食材明细（高蛋白可可饮 + 坚果）", _LUNCH_INGS, _LUNCH_DETAIL)
         with st.expander("✏️ 特殊情况：自定义食材（覆盖默认值）"):
             st.caption("每行 `食材名  数量  单位`")
             st.text_area("午餐食材", height=80, key="fd_lunch_custom_txt",
@@ -1098,9 +1519,8 @@ def _tab_fullday() -> None:
     st.divider()
     st.subheader("全日 DRI 达成率（每人）")
     
-    p_min, p_max = _protein_target()
-    prot_dri_1p = p_min / 2.0
-    
+    prot_dri_1p = _dri()["protein"]   # same target as the 全日营养 bars
+
     for label, key, unit, warn in [
         ("热量",     "kcal",      "kcal", False),
         ("蛋白质",   "protein",   "g",    False),
@@ -1117,8 +1537,15 @@ def _tab_fullday() -> None:
         ("镁",       "magnesium", "mg",   False),
         ("锌",       "zinc",      "mg",   False),
     ]:
-        target = prot_dri_1p if key == "protein" else _DRI.get(key, 1.0)
+        target = prot_dri_1p if key == "protein" else _dri().get(key, 1.0)
         _bar(label, total.get(key, 0.0), target, unit, warn_over=warn)
+        if key == "fat":
+            # total[] is already per-person here, so no further division.
+            _render_fat_breakdown(
+                total.get("fat", 0.0), total.get("satfat", 0.0),
+                total.get("monofat", 0.0), total.get("polyfat", 0.0),
+                total.get("fat_detailed", 0.0), _dri(), scope="今日",
+            )
 
     # ── AI Nutrition Advisor ───────────────────────────────────
     st.divider()
@@ -1143,23 +1570,34 @@ def _tab_fullday() -> None:
                 if st.button("✨ 获取今日营养建议", type="primary", use_container_width=True,
                              key="ai_advice_btn"):
                     with st.spinner("AI 营养师正在分析…"):
-                        advice = get_nutrition_advice(total, dinner_names, _DRI)
+                        advice = get_nutrition_advice(total, dinner_names, _dri())
                     st.session_state["ai_advice"] = advice
                     st.rerun()
                 if "ai_advice" in st.session_state:
                     st.markdown(st.session_state["ai_advice"])
 
 
+# Same 14 nutrients the 全日营养 bars show, so the two views can't disagree —
+# daily_logs already stored all of them, the heatmap just wasn't displaying
+# 钾/维D/维A/镁/锌. The numeric column is only a fallback: live targets come
+# from _dri(), which follows the user's calorie goal and macro split.
+# 饱和脂肪 is warn_over (a ceiling, like sodium) rather than a goal to hit.
 _HISTORY_DRI = [
-    ("kcal",      "热量",  2000, False),
-    ("protein",   "蛋白质",  50, False),
-    ("fat",       "脂肪",    65, False),
-    ("carbs",     "碳水",   300, False),
-    ("sodium",    "钠",    2300, True),   # warn_over → lower is better
-    ("fiber",     "纤维",    25, False),
-    ("vitc",      "维C",     90, False),
-    ("iron",      "铁",      10, False),
-    ("calcium",   "钙",    1000, False),
+    ("kcal",      "热量",   2000, False),
+    ("protein",   "蛋白质",   50, False),
+    ("fat",       "脂肪",     65, False),
+    ("satfat",    "饱和脂肪", 22, True),    # ceiling ≈10% of energy
+    ("carbs",     "碳水",    300, False),
+    ("sodium",    "钠",     2300, True),   # warn_over → lower is better
+    ("fiber",     "纤维",     25, False),
+    ("vitc",      "维C",      90, False),
+    ("iron",      "铁",       10, False),
+    ("calcium",   "钙",     1000, False),
+    ("potassium", "钾",     4700, False),
+    ("vitd",      "维D",      15, False),
+    ("vita",      "维A",     800, False),
+    ("magnesium", "镁",      350, False),
+    ("zinc",      "锌",       10, False),
 ]
 
 
@@ -1200,10 +1638,11 @@ def _tab_history() -> None:
         all_names:   list = []
         all_fruits:  list = []
         daily_counts: list = []
+        known_fruits = set(get_fruits_list())   # includes user-added ones
         for log in with_snap:
             snap = json.loads(log["ingredients_snapshot"])
             all_names.extend(snap)
-            all_fruits.extend(s for s in snap if s in _FRUITS_LIST)
+            all_fruits.extend(s for s in snap if s in known_fruits)
             daily_counts.append(len(snap))
 
         unique_ings   = list(dict.fromkeys(all_names))
@@ -1229,9 +1668,8 @@ def _tab_history() -> None:
     # DRI completion heatmap
     st.subheader("📊 DRI 达成率（近7日）")
     
-    p_min, p_max = _protein_target()
-    prot_dri_1p = p_min / 2.0
-    
+    prot_dri_1p = _dri()["protein"]   # same target as the 全日营养 bars
+
     dri_rows = []
     for log in reversed(recent_7):
         if log.get("total_nutrients_json"):
@@ -1241,9 +1679,18 @@ def _tab_history() -> None:
                     ("kcal", "protein", "fat", "carbs", "sodium", "fiber")}
 
         row = {"日期": log["date"]}
+        dri_now = _dri()   # kcal from settings; carbs/fat scaled to it
         for key, label, default_dri, warn_over in _HISTORY_DRI:
+            # A key absent from the stored snapshot means "not tracked back then",
+            # not "zero". Showing 0% would paint 饱和脂肪 green (✅ under the
+            # ceiling) for every log saved before that field existed.
+            if key not in nutr:
+                row[label] = "—"
+                continue
             val = float(nutr.get(key) or 0)
-            actual_dri = prot_dri_1p if key == "protein" else default_dri
+            # protein is body-weight based; everything else follows _dri() so the
+            # heatmap can't disagree with the bars on the 全日营养 tab.
+            actual_dri = prot_dri_1p if key == "protein" else dri_now.get(key, default_dri)
             pct = val / actual_dri * 100 if actual_dri > 0 else 0.0
             
             icon = ("✅" if pct < 65 else "🟡" if pct < 100 else "🔴") if warn_over \

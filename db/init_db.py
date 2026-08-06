@@ -248,7 +248,7 @@ def _user_settings_seeds():
         ("weight_b", "55"),                # Person B body weight (kg) — placeholder
         ("protein_multiplier_min", "1.2"),
         ("protein_multiplier_max", "1.5"),
-        ("target_kcal_per_day", "1800"),   # 2-person total
+        ("target_kcal_per_day", "1700"),   # per person, per day
         ("language", "zh"),
         ("max_wok_dishes", "1"),
         ("condiment_intake_ratio", "0.25"),  # fraction of condiment mass actually consumed
@@ -387,6 +387,16 @@ def migrate_database() -> None:
         # 5. nutrition_cache: extended micronutrients
         nc_cols = [r[1] for r in conn.execute("PRAGMA table_info(nutrition_cache)").fetchall()]
         for col in ("vitd_per_100g", "vita_per_100g", "magnesium_per_100g", "zinc_per_100g"):
+            if col not in nc_cols:
+                conn.execute(f"ALTER TABLE nutrition_cache ADD COLUMN {col} REAL")
+                print(f"  migration: added nutrition_cache.{col}")
+
+        # 15. nutrition_cache: fat breakdown. Left NULL rather than 0 on purpose —
+        #     "not fetched yet" must stay distinguishable from "genuinely zero
+        #     saturated fat", otherwise the UI shows a confident 0 for 600+ rows
+        #     that simply have no data. Backfill: scripts/backfill_fat_detail.py
+        nc_cols = [r[1] for r in conn.execute("PRAGMA table_info(nutrition_cache)").fetchall()]
+        for col in ("satfat_per_100g", "monofat_per_100g", "polyfat_per_100g"):
             if col not in nc_cols:
                 conn.execute(f"ALTER TABLE nutrition_cache ADD COLUMN {col} REAL")
                 print(f"  migration: added nutrition_cache.{col}")

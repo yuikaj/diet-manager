@@ -233,6 +233,73 @@ elif page == "settings":
 
     st.info("调料摄入比例现已改为**每道菜独立设置**，请在菜谱编辑页调整（默认 100%）。")
 
+    # ── Personal targets ─────────────────────────────────────
+    st.subheader("🎯 个人目标")
+    from views.nutrition import get_kcal_target
+
+    cur_kcal = get_kcal_target()
+    kc1, kc2 = st.columns([2, 3])
+    new_kcal = kc1.number_input(
+        "每日热量目标（每人 kcal）", min_value=800, max_value=4000,
+        value=int(cur_kcal), step=50, key="set_kcal_target",
+        help="营养分析页的「热量 % DRI」按这个值计算。之前它一直用写死的 2000，"
+             "忽略了这里的设置。",
+    )
+    if kc2.button("💾 保存热量目标", key="set_kcal_save"):
+        conn = get_connection()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?, ?)",
+                ("target_kcal_per_day", str(int(new_kcal))),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        st.success(f"✅ 已保存：{int(new_kcal)} kcal/人/天")
+        st.rerun()
+
+    # ── Macro split ──────────────────────────────────────────
+    from views.nutrition import get_macro_split, save_macro_split, _MACRO_KCAL_PER_G
+
+    st.markdown("**三大营养素供能比例**")
+    st.caption("碳水/脂肪/蛋白质各占每日热量的百分比，三项须合计 100%。"
+               "AMDR 可接受范围：蛋白质 10–35% · 脂肪 20–35% · 碳水 45–65%。")
+    cur = get_macro_split()
+    m1, m2, m3 = st.columns(3)
+    p_pct = m1.number_input("蛋白质 %", 10.0, 40.0, float(cur["protein"]), 1.0, key="set_pct_p")
+    f_pct = m2.number_input("脂肪 %",   15.0, 45.0, float(cur["fat"]),     1.0, key="set_pct_f")
+    c_pct = m3.number_input("碳水 %",   25.0, 70.0, float(cur["carbs"]),   1.0, key="set_pct_c")
+
+    total_pct = p_pct + f_pct + c_pct
+    grams = {k: new_kcal * (v / 100.0) / _MACRO_KCAL_PER_G[k]
+             for k, v in (("protein", p_pct), ("fat", f_pct), ("carbs", c_pct))}
+    st.caption(f"按 {int(new_kcal)} kcal 折算：蛋白质 **{grams['protein']:.0f} g** · "
+               f"脂肪 **{grams['fat']:.0f} g** · 碳水 **{grams['carbs']:.0f} g**")
+
+    if abs(total_pct - 100.0) > 0.01:
+        st.warning(f"三项合计 {total_pct:.0f}%，需要正好 100% 才能保存")
+    elif st.button("💾 保存供能比例", key="set_pct_save"):
+        save_macro_split(p_pct, f_pct, c_pct)
+        st.success("✅ 已保存")
+        st.rerun()
+
+    # ── Daily supplements ────────────────────────────────────
+    from views.nutrition import get_supplements, save_supplements
+
+    st.markdown("**每日补剂**")
+    st.caption("每天固定服用的营养素，会自动加进全日营养合计。"
+               "维生素 D 靠食物很难达标，不记进来的话 DRI 条会一直是红的。")
+    supp = get_supplements()
+    s1, s2, s3 = st.columns(3)
+    vd = s1.number_input("维生素D (µg)", 0.0, 250.0, float(supp.get("vitd", 0)), 2.5, key="set_sup_vitd")
+    ca = s2.number_input("钙 (mg)",      0.0, 2000.0, float(supp.get("calcium", 0)), 50.0, key="set_sup_ca")
+    fe = s3.number_input("铁 (mg)",      0.0, 100.0, float(supp.get("iron", 0)), 1.0, key="set_sup_fe")
+    if st.button("💾 保存补剂", key="set_sup_save"):
+        save_supplements({k: v for k, v in
+                          (("vitd", vd), ("calcium", ca), ("iron", fe)) if v > 0})
+        st.success("✅ 已保存")
+        st.rerun()
+
     st.subheader("数据库状态")
     col1, col2, col3 = st.columns(3)
     col1.metric("库存条目", counts["inventory"])

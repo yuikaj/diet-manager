@@ -49,8 +49,9 @@ def save_to_cache(
                 sodium_per_100g, fiber_per_100g, vitc_per_100g, iron_per_100g,
                 calcium_per_100g, potassium_per_100g,
                 vitd_per_100g, vita_per_100g, magnesium_per_100g, zinc_per_100g,
+                satfat_per_100g, monofat_per_100g, polyfat_per_100g,
                 source
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 usda_food_id, ingredient_name, en_name,
@@ -61,6 +62,8 @@ def save_to_cache(
                 nutrients.get("calcium"), nutrients.get("potassium"),
                 nutrients.get("vitd"),    nutrients.get("vita"),
                 nutrients.get("magnesium"), nutrients.get("zinc"),
+                nutrients.get("satfat"), nutrients.get("monofat"),
+                nutrients.get("polyfat"),
                 source,
             ),
         )
@@ -91,6 +94,8 @@ def update_cached_nutrients(ingredient_name: str, nutrients: dict) -> None:
         "calcium": "calcium_per_100g", "potassium": "potassium_per_100g",
         "vitd": "vitd_per_100g", "vita": "vita_per_100g",
         "magnesium": "magnesium_per_100g", "zinc": "zinc_per_100g",
+        "satfat": "satfat_per_100g", "monofat": "monofat_per_100g",
+        "polyfat": "polyfat_per_100g",
         "en_name": "en_name",
     }
     sets = ", ".join(f"{_COL_MAP[k]}=?" for k in nutrients if k in _COL_MAP)

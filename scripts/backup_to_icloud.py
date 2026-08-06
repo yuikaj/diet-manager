@@ -70,3 +70,14 @@ def _prune_old_backups() -> None:
 if __name__ == "__main__":
     backup()
     print(f"备份完成：{ICLOUD_BACKUP_PATH}")
+
+    # Also push to the private GitHub repo from here rather than via its own
+    # LaunchAgent: on Ventura a newly added agent is blocked by the background-item
+    # approval system (posix_spawn → "Operation not permitted", exit 78), while
+    # this already-approved job runs fine. Failures are swallowed so a git/network
+    # problem can never take down the local iCloud backup above.
+    try:
+        import backup_to_git
+        backup_to_git.main()
+    except Exception as e:
+        print(f"⚠️ Git 备份失败（本地备份不受影响）：{e}")

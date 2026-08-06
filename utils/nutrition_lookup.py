@@ -43,6 +43,11 @@ _NUTRIENT_ID_MAP = {
     1106: "vita",
     1090: "magnesium",
     1095: "zinc",
+    # Fat breakdown. USDA reports these only for some foods; absent → stays None,
+    # which the UI renders as "—" instead of a misleading 0.
+    1258: "satfat",     # saturated
+    1292: "monofat",    # monounsaturated
+    1293: "polyfat",    # polyunsaturated
 }
 
 # Unit → grams conversion (approx)
@@ -89,6 +94,9 @@ class NutritionPer100g:
     vita: Optional[float] = None
     magnesium: Optional[float] = None
     zinc: Optional[float] = None
+    satfat: Optional[float] = None
+    monofat: Optional[float] = None
+    polyfat: Optional[float] = None
     source: str = "unknown"
     food_name: str = ""
     usda_url: str = ""
@@ -110,6 +118,13 @@ class MealNutrition:
     vita: float = 0.0
     magnesium: float = 0.0
     zinc: float = 0.0
+    satfat: float = 0.0
+    monofat: float = 0.0
+    polyfat: float = 0.0
+    # Grams of total fat contributed by ingredients that actually carry a
+    # breakdown. Without it, "饱和 3g" next to "总脂肪 40g" reads as a real ratio
+    # when it may just mean most ingredients have no saturated-fat data.
+    fat_detailed: float = 0.0
     found: int = 0
     missing: list = field(default_factory=list)
 
@@ -160,6 +175,9 @@ def _row_to_nutrition(row: dict) -> NutritionPer100g:
         vita=row.get("vita_per_100g"),
         magnesium=row.get("magnesium_per_100g"),
         zinc=row.get("zinc_per_100g"),
+        satfat=row.get("satfat_per_100g"),
+        monofat=row.get("monofat_per_100g"),
+        polyfat=row.get("polyfat_per_100g"),
         source=row.get("source", "cache"),
         food_name=row.get("en_name") or row.get("ingredient_name", ""),
         usda_url=usda_url,
@@ -245,6 +263,9 @@ def lookup_ingredient(
             iron=p.get("iron"),
             calcium=p.get("calcium"),
             potassium=p.get("potassium"),
+            satfat=p.get("satfat"),
+            monofat=p.get("monofat"),
+            polyfat=p.get("polyfat"),
             source=entry.get("source") or "local",
             food_name=entry.get("en_name", name),
         )
@@ -257,6 +278,7 @@ def lookup_ingredient(
                 "carbs": n.carbs, "sodium": n.sodium, "fiber": n.fiber,
                 "vitc": n.vitc, "iron": n.iron, "calcium": n.calcium,
                 "potassium": n.potassium,
+                "satfat": n.satfat, "monofat": n.monofat, "polyfat": n.polyfat,
             },
             source=entry.get("source") or "local",
         )
@@ -283,6 +305,9 @@ def lookup_ingredient(
             vita=nutrients.get("vita"),
             magnesium=nutrients.get("magnesium"),
             zinc=nutrients.get("zinc"),
+            satfat=nutrients.get("satfat"),
+            monofat=nutrients.get("monofat"),
+            polyfat=nutrients.get("polyfat"),
             source="usda",
             food_name=description,
             usda_url=f"https://fdc.nal.usda.gov/food-details/{food_id}/nutrients",
@@ -349,6 +374,13 @@ def calc_nutrition(ingredients: list[dict]) -> MealNutrition:
         result.vita      += (n.vita      or 0) * scale
         result.magnesium += (n.magnesium or 0) * scale
         result.zinc      += (n.zinc      or 0) * scale
+        # Only accumulate the breakdown when the ingredient actually has it, and
+        # track how much fat that covers, so the UI can say how complete it is.
+        if n.satfat is not None or n.monofat is not None or n.polyfat is not None:
+            result.satfat   += (n.satfat   or 0) * scale
+            result.monofat  += (n.monofat  or 0) * scale
+            result.polyfat  += (n.polyfat  or 0) * scale
+            result.fat_detailed += (n.fat or 0) * scale
         result.found += 1
 
     return result
@@ -402,6 +434,13 @@ def calc_nutrition_with_breakdown(ingredients: list) -> tuple:
         total.vita      += (n.vita      or 0) * scale
         total.magnesium += (n.magnesium or 0) * scale
         total.zinc      += (n.zinc      or 0) * scale
+        # Only accumulate the breakdown when the ingredient actually has it, and
+        # track how much fat that covers, so the UI can say how complete it is.
+        if n.satfat is not None or n.monofat is not None or n.polyfat is not None:
+            total.satfat   += (n.satfat   or 0) * scale
+            total.monofat  += (n.monofat  or 0) * scale
+            total.polyfat  += (n.polyfat  or 0) * scale
+            total.fat_detailed += (n.fat or 0) * scale
         total.found += 1
 
         ir_label = f" ×{ir:.0%}" if ir < 1.0 else ""
