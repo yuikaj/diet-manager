@@ -6,10 +6,23 @@ import streamlit as st
 from utils.cache import (
     get_all_inventory_cached as get_all_inventory,
     toggle_in_stock, set_quantity, add_item, delete_item,
-    toggle_perishable,
+    toggle_perishable, set_portion_weight,
 )
 
 _INV_CATEGORIES = ["leafy_veg", "protein", "seasoning", "dry_goods", "other"]
+
+# Starting point for a new item's 每份克重, by category. Only a prefill — the
+# real weight varies per item (一根黄瓜 vs 一斤青菜), so the add form and the
+# ⚖️ 每份克重 panel both let you override it. Single definition on purpose:
+# this used to be duplicated across the add form (which silently used the
+# db-layer default of 200 for everything), the AI importer and the shopping
+# list, so how much "1 份" weighed depended on which screen created the row.
+_PORTION_DEFAULT_G = {"leafy_veg": 500.0, "protein": 300.0}
+_PORTION_FALLBACK_G = 200.0
+
+
+def default_portion_g(category: str) -> float:
+    return _PORTION_DEFAULT_G.get(category, _PORTION_FALLBACK_G)
 _INV_CAT_LABELS = {
     "leafy_veg": "🥬 叶菜/时令",
     "protein":   "🥩 蛋白/冷库",
@@ -155,13 +168,53 @@ def _add_mixed_form(category: str) -> None:
             col1, col2 = st.columns(2)
             is_perishable = col1.checkbox("易坏 🔴")
             is_frozen = col2.checkbox("冷冻")
-            init_qty = st.number_input("初始份数", min_value=0, value=0, step=1)
+            qc1, qc2 = st.columns(2)
+            init_qty = qc1.number_input("初始份数", min_value=0, value=0, step=1)
+            # Was missing entirely, so every hand-added item silently took the
+            # db-layer default of 200g regardless of category — 35 of 36 叶菜 rows
+            # ended up at 200g while the page's 天数 estimate assumed 500g.
+            portion_g = qc2.number_input(
+                "每份约几克", min_value=1.0, max_value=5000.0,
+                value=default_portion_g(category), step=50.0,
+                help="一份大概多重。之后可在「⚖️ 每份克重」里随时改。",
+            )
             notes = st.text_input("备注")
             if st.form_submit_button("添加") and name.strip():
                 item_type = "boolean" if is_staple else "quantity"
-                new_id = add_item(name.strip(), category, item_type, is_perishable=is_perishable, is_frozen=is_frozen, notes=notes or None)
+                new_id = add_item(name.strip(), category, item_type,
+                                  is_perishable=is_perishable, is_frozen=is_frozen,
+                                  portion_weight_g=float(portion_g),
+                                  notes=notes or None)
                 if item_type == "quantity" and init_qty > 0:
                     set_quantity(new_id, float(init_qty))
+                st.rerun()
+
+
+def _portion_weight_form(items: list) -> None:
+    """Set 每份克重 per item — the only place this is editable.
+
+    Before this existed the value could only be changed by hand-written SQL, so
+    whatever the creating code path happened to pass stuck forever.
+    """
+    qty_items = [i for i in items if i.get("item_type") == "quantity"]
+    if not qty_items:
+        return
+    with st.expander("⚖️ 每份克重（各食材独立设置）"):
+        st.caption("「1 份」对每种食材的实际重量。影响每行的 ≈克重 和页面顶部的「约 X 天份」估算。")
+        for item in qty_items:
+            cur = float(item.get("portion_weight_g") or _PORTION_FALLBACK_G)
+            c1, c2 = st.columns([3, 2])
+            c1.write(f"**{item['name']}**")
+            # Current DB value folded into the key: Streamlit ignores `value=`
+            # once a key exists, so a fixed key would keep serving this session's
+            # stale number and the write-on-diff below would push it back into
+            # the DB, reverting edits made elsewhere (CLAUDE.md 第 25 条).
+            new = c2.number_input(
+                "每份克重", min_value=1.0, max_value=5000.0, value=cur, step=50.0,
+                key=f"pw_{item['id']}_{cur:g}", label_visibility="collapsed",
+            )
+            if new != cur:
+                set_portion_weight(item["id"], new)
                 st.rerun()
 
 def _delete_mixed_form(items: list) -> None:
@@ -219,6 +272,7 @@ def _tab_leafy(leafy_qty: list, leafy_bool: list, shopping_mode: bool) -> None:
     if leafy_bool:
         _render_bool_items(leafy_bool)
     _add_mixed_form("leafy_veg")
+    _portion_weight_form(leafy_qty)
     _delete_mixed_form(leafy_qty + leafy_bool)
 
 
@@ -230,6 +284,7 @@ def _tab_protein(prot_qty: list, prot_bool: list, shopping_mode: bool) -> None:
     if prot_bool:
         _render_bool_items(prot_bool)
     _add_mixed_form("protein")
+    _portion_weight_form(prot_qty)
     _delete_mixed_form(prot_qty + prot_bool)
 
 def _tab_seasoning(seasoning: list) -> None:
@@ -404,7 +459,7 @@ def _ai_inventory_expander() -> None:
                         new_id = add_item(
                             name, cat, item_type,
                             is_perishable=is_per,
-                            portion_weight_g=(500 if cat == "leafy_veg" else 300 if cat == "protein" else 200),
+                            portion_weight_g=default_portion_g(cat),
                         )
                         if item_type == "quantity" and portions > 0:
                             set_quantity(new_id, portions)
@@ -471,7 +526,15 @@ def show() -> None:
 
     leafy_portions = sum(i.get("quantity") or 0 for i in leafy_qty)
     prot_portions = sum(i.get("quantity") or 0 for i in prot_qty)
-    leafy_kg, prot_kg = (leafy_portions * 500) / 1000, (prot_portions * 300) / 1000
+
+    # Weigh each item by its own portion_weight_g. Multiplying the portion count
+    # by a flat 500/300 assumed every row matched the category default, which
+    # almost none do — 叶菜 was reading 2.5× high, 蛋白 1.5× high.
+    def _kg(items: list) -> float:
+        return sum((i.get("quantity") or 0) * (i.get("portion_weight_g") or _PORTION_FALLBACK_G)
+                   for i in items) / 1000.0
+
+    leafy_kg, prot_kg = _kg(leafy_qty), _kg(prot_qty)
     leafy_days, prot_days = int(leafy_kg / 1.0), int(prot_kg / 0.6)
     urgent = [i for i in leafy_qty if i.get("is_perishable") and (i.get("quantity") or 0) > 0]
     urgent += [i for i in leafy_bool if i.get("is_perishable") and i.get("in_stock")]

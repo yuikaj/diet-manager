@@ -204,10 +204,12 @@ def _fetch_usda(en_query: str) -> Optional[tuple[str, str, dict]]:
             timeout=8,
         )
         resp.raise_for_status()
-    except requests.RequestException:
+        # ValueError too: an error page or a truncated body makes .json() raise,
+        # which would otherwise escape and take down whichever page is computing.
+        data = resp.json()
+    except (requests.RequestException, ValueError):
         return None
 
-    data = resp.json()
     foods = data.get("foods", [])
     if not foods:
         return None

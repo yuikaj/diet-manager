@@ -54,7 +54,9 @@ def add_item(
     item_id = str(uuid.uuid4())
     in_stock = 0 if item_type == "boolean" else None
     quantity = 0.0 if item_type == "quantity" else None
-    unit = "g" if item_type == "quantity" else None
+    # `quantity` counts 份, not grams (grams come from portion_weight_g), so the
+    # unit label has to say 份 — matching the column default and every UI string.
+    unit = "份" if item_type == "quantity" else None
     conn = get_connection()
     conn.execute(
         """INSERT INTO inventory
@@ -72,6 +74,22 @@ def add_item(
 def delete_item(item_id: str) -> None:
     conn = get_connection()
     conn.execute("DELETE FROM inventory WHERE id=?", (item_id,))
+    conn.commit()
+    conn.close()
+
+
+def set_portion_weight(item_id: str, grams: float) -> None:
+    """How many grams one 份 of this item weighs.
+
+    Varies a lot per item (一根黄瓜 vs 一斤青菜 vs 整条鱼), so it is set per row
+    rather than derived from the category. Feeds the ≈Xg label on each row and
+    the 天数 estimate at the top of the page.
+    """
+    conn = get_connection()
+    conn.execute(
+        "UPDATE inventory SET portion_weight_g=?, updated_at=datetime('now','localtime') WHERE id=?",
+        (max(1.0, float(grams)), item_id),
+    )
     conn.commit()
     conn.close()
 

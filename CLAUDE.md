@@ -379,7 +379,33 @@ app 内的 AI 功能（AI 入库/AI 录入/库存解析/购物清单解析）用
 
 **e. 保存今日记录混用旧快照 + 实时控件**：`compute_fullday_silent()` 现在把 `fruits`/`fruit_g` 一并返回，保存时用返回值而非重读 widget——原来"算完营养后改水果再保存"会让存进去的水果清单和热量对不上。
 
-### 34. 已知但暂不处理
+### 34. 库存「每份克重」从无入口到逐项可设（2026-08）
+
+`portion_weight_g` 存在已久，但**没有任何 UI 能改它**，值完全取决于是哪条代码路径创建的条目：
+
+| 创建路径 | 叶菜 | 蛋白 |
+|---|---|---|
+| 手动「➕ 添加条目」 | 200 g（根本没传，吃 `add_item()` 的函数默认值） | 200 g |
+| ⚡ AI 批量录入 / 购物清单入库 | 500 g | 300 g |
+| 顶部「约 X 天份」metric | 按 500 g 算 | 按 300 g 算 |
+
+结果：叶菜 36 项里 35 项是 200g，而 metric 按 500g 算——**天数估算系统性高估 2.5 倍**（蛋白 1.5 倍）。CLAUDE.md 第 8 条写的「叶菜默认 500g」只是文档意图，手动添加那条路从没实现过。
+
+修复：
+- **`_PORTION_DEFAULT_G` 单一常量** + `default_portion_g()`，三处调用点统一（原来三份拷贝各不相同）
+- **添加表单新增「每份克重」输入**，按分类预填、可当场改
+- **新增「⚖️ 每份克重」expander**（叶菜/蛋白 tab 各一个），逐项调整。widget key 带当前值（`pw_{id}_{值}`），遵循第 25 条那个写回陷阱的解法
+- **metric 改为 `Σ(份数 × 该项 portion_weight_g)`**，不再乘一个统一常数
+- 存量数据**不做批量归一**——一份到底多重因食材而异（一根黄瓜 vs 一斤青菜），逐项设才对
+
+同批次的其它小修：
+- `_bar()` 的 🚨 分支原本不可达（`pct>0.65` 先匹配），钠严重超标和轻微偏高图标一样。改为先判 `>1.0`
+- `add_item()` 给按份条目写的 `unit` 从 `'g'` 改回 `'份'`（份数模型下 quantity 存的是份，不是克）
+- `_fetch_usda()` 的 except 补上 `ValueError`：USDA 返回 HTML 错误页时 `.json()` 会抛异常冲出去打崩当前页
+- 购物清单入库对 AI 返回的 `category` 做白名单校验：越界的值会写进 DB 但没有任何 tab 渲染它、可做菜过滤也看不到，等于买了东西却查无此物
+- 删掉 `db/daily_log.py` 的 `_BFST_DEFAULTS`/`_LUNCH_DEFAULTS` 和 `get/update_default_preset()`（105 行死代码）——正是第 28 条判定"维A 低估 10.7 倍"的那组原始估算值，无调用方但留着就是隐患。`meal_presets` 表本身未动
+
+### 35. 已知但暂不处理
 
 - **`utils/nutrition_lookup.py` 里 `calc_nutrition()` 的入参 key 也叫 `intake_ratio`**，和刚废弃的 DB 列同名。它指的是"这次计算对该食材打几折"，是计算层参数不是数据列。改名要动所有调用点，暂留——但读代码时注意区分。
 - **微量营养素没有覆盖率指标**：只有脂肪细分有 `fat_detailed`（能提示"只有 32% 的脂肪有细分数据"）。其余 13 项缺数据时按 0 静默累加，"真的吃少了"和"没数据"在 DRI 条上分不出来。按实际用量加权测算，维A/镁/锌/钾/钙/铁 当前覆盖 75–100%（早餐 100%），影响可控；**只有维D 是 27%**，但它已由补剂设置兜底。继续补数据（`scripts/ai_fill_micronutrients.py`）比做仪表盘划算。
@@ -423,7 +449,7 @@ app 内的 AI 功能（AI 入库/AI 录入/库存解析/购物清单解析）用
 | 路径 | 说明 |
 |------|------|
 | `app.py` | 单页 Streamlit 入口，侧边栏导航，支持 `_nav_pending` 跨页跳转 |
-| `db/init_db.py` | SQLite schema 初始化（幂等），含 migration 逻辑（步骤 1-12） |
+| `db/init_db.py` | SQLite schema 初始化（幂等），含 migration 逻辑（步骤 1-16） |
 | `db/recipes.py` | 菜谱/食材 CRUD，含 `condiment_ratio`、`serving_ratio`、`en_name`/`en_desc`/`zh_desc` |
 | `db/daily_log.py` | 每日记录 CRUD，含 `dinner_staple`、`ingredients_snapshot`、`total_nutrients_json` |
 | `utils/cache.py` | `st.cache_data`/`st.cache_resource` 缓存层，包 `get_all_recipes`/`get_all_inventory`/`get_all_ingredients_grouped` 及写操作自动失效 |

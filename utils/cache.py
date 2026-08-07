@@ -20,6 +20,7 @@ from db.inventory import (
     add_item as _add_item,
     delete_item as _delete_item,
     toggle_perishable as _toggle_perishable,
+    set_portion_weight as _set_portion_weight,
 )
 
 
@@ -107,4 +108,9 @@ def delete_item(item_id: str) -> None:
 
 def toggle_perishable(item_id: str, value: bool) -> None:
     _toggle_perishable(item_id, value)
+    invalidate_inventory_cache()
+
+
+def set_portion_weight(item_id: str, grams: float) -> None:
+    _set_portion_weight(item_id, grams)
     invalidate_inventory_cache()

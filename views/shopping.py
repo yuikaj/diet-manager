@@ -173,20 +173,25 @@ def _commit_to_inventory(items: list) -> tuple:
         except Exception as e:
             return False, (f"已累加 {len(direct)} 项，但 {len(new_text_parts)} 项新条目"
                            f"分类失败：{e}")
+        from views.inventory import _INV_CATEGORIES, default_portion_g
+
         for p in parsed:
             name = p.get("name", "").strip()
             if not name:
                 continue
+            # Whitelist the model's answer: an unrecognised category writes a row
+            # that no inventory tab renders and no availability check sees — the
+            # item is in the DB but invisible everywhere.
             cat = p.get("category", "other")
+            if cat not in _INV_CATEGORIES:
+                cat = "other"
             item_type = p.get("item_type", "quantity")
             portions = float(new_portion_map.get(name, p.get("portions", 1)))
             try:
                 new_id = add_item(
                     name, cat, item_type,
                     is_perishable=bool(p.get("is_perishable")),
-                    portion_weight_g=(500 if cat == "leafy_veg"
-                                      else 300 if cat == "protein"
-                                      else 200),
+                    portion_weight_g=default_portion_g(cat),
                 )
                 if item_type == "quantity" and portions > 0:
                     set_quantity(new_id, portions)

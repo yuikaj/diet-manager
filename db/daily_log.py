@@ -1,113 +1,19 @@
-"""CRUD for daily_logs and meal_presets tables."""
+"""CRUD for daily_logs.
+
+The old `_BFST_DEFAULTS` / `_LUNCH_DEFAULTS` estimate dicts and the
+get/update_default_preset() helpers that read them are gone. Those were the
+PRD-era hardcoded breakfast/lunch numbers whose micronutrients were badly wrong
+(维A 60µg against a real ~630µg, 镁 80mg against ~275mg) — the main reason those
+two nutrients looked permanently deficient. 早午餐 now goes through the nutrition
+engine from the real ingredient lists in views/nutrition.py (_BFST_INGS /
+_LUNCH_INGS), so it tracks the ingredient database as that improves. Nothing
+called these any more; leaving them here was an invitation to wire the wrong
+numbers back in. The meal_presets table itself is untouched.
+"""
 import json
 import uuid
 from typing import Optional
 from db.init_db import get_connection
-
-# Default nutrition values (per person) — mirrors nutrition.py hardcoded constants
-_BFST_DEFAULTS = dict(
-    kcal=580, protein=30, fat=18, carbs=72,
-    sodium=280, fiber=16, vitc=8, iron=4,
-    calcium=350, potassium=600, vitd=1.5, vita=60,
-    magnesium=80, zinc=3,
-)
-_LUNCH_DEFAULTS = dict(
-    kcal=210, protein=15, fat=8, carbs=18,
-    sodium=150, fiber=1, vitc=0, iron=0.5,
-    calcium=400, potassium=500, vitd=2.0, vita=0,
-    magnesium=30, zinc=1,
-)
-
-
-# ── Meal presets ──────────────────────────────────────────────
-
-def get_default_preset(meal_type: str) -> dict:
-    """Return nutrition facts dict for the default preset of a meal type.
-    Falls back to hardcoded estimates if no DB preset exists.
-    """
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT items FROM meal_presets WHERE meal_type=? AND is_default=1 LIMIT 1",
-            (meal_type,),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    if not row:
-        return _BFST_DEFAULTS if meal_type == "breakfast" else _LUNCH_DEFAULTS
-
-    data = json.loads(row["items"])
-    # Build a nutrition dict from DB preset (uses estimated_ fields or defaults)
-    defaults = _BFST_DEFAULTS if meal_type == "breakfast" else _LUNCH_DEFAULTS
-    return {
-        "kcal":      float(data.get("estimated_kcal",    defaults["kcal"])),
-        "protein":   float(data.get("estimated_protein_g", defaults["protein"])),
-        "fat":       float(data.get("estimated_fat_g",   defaults["fat"])),
-        "carbs":     float(data.get("estimated_carbs_g", defaults["carbs"])),
-        "sodium":    float(data.get("estimated_sodium_mg", defaults["sodium"])),
-        "fiber":     float(data.get("estimated_fiber_g", defaults["fiber"])),
-        "vitc":      float(data.get("estimated_vitc_mg", defaults["vitc"])),
-        "iron":      float(data.get("estimated_iron_mg", defaults["iron"])),
-        "calcium":   float(data.get("estimated_calcium_mg", defaults["calcium"])),
-        "potassium": float(data.get("estimated_potassium_mg", defaults["potassium"])),
-        "vitd":      float(data.get("estimated_vitd_ug", defaults["vitd"])),
-        "vita":      float(data.get("estimated_vita_ug", defaults["vita"])),
-        "magnesium": float(data.get("estimated_magnesium_mg", defaults["magnesium"])),
-        "zinc":      float(data.get("estimated_zinc_mg", defaults["zinc"])),
-        "items":     data.get("items", []),
-    }
-
-
-def update_default_preset(meal_type: str, nutrition: dict) -> None:
-    """Update the estimated nutrition values for the default preset of a meal type."""
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT id, items FROM meal_presets WHERE meal_type=? AND is_default=1 LIMIT 1",
-            (meal_type,),
-        ).fetchone()
-
-        mapping = {
-            "kcal":      "estimated_kcal",
-            "protein":   "estimated_protein_g",
-            "fat":       "estimated_fat_g",
-            "carbs":     "estimated_carbs_g",
-            "sodium":    "estimated_sodium_mg",
-            "fiber":     "estimated_fiber_g",
-            "vitc":      "estimated_vitc_mg",
-            "iron":      "estimated_iron_mg",
-            "calcium":   "estimated_calcium_mg",
-            "potassium": "estimated_potassium_mg",
-            "vitd":      "estimated_vitd_ug",
-            "vita":      "estimated_vita_ug",
-            "magnesium": "estimated_magnesium_mg",
-            "zinc":      "estimated_zinc_mg",
-        }
-
-        if row:
-            data = json.loads(row["items"])
-            for nutr_key, db_key in mapping.items():
-                if nutr_key in nutrition:
-                    data[db_key] = float(nutrition[nutr_key])
-            conn.execute(
-                "UPDATE meal_presets SET items=? WHERE id=?",
-                (json.dumps(data, ensure_ascii=False), row["id"]),
-            )
-        else:
-            data = {db_key: float(nutrition.get(nutr_key, 0))
-                    for nutr_key, db_key in mapping.items()}
-            conn.execute(
-                "INSERT INTO meal_presets (id, name, meal_type, items, is_default) VALUES (?,?,?,?,1)",
-                (str(uuid.uuid4()),
-                 "默认早餐" if meal_type == "breakfast" else "默认午餐",
-                 meal_type,
-                 json.dumps(data, ensure_ascii=False)),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
 
 # ── Daily logs ────────────────────────────────────────────────
 

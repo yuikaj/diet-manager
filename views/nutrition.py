@@ -240,8 +240,16 @@ def _bar(label: str, value: float, dri_1p: float, unit: str,
     else:
         pct = pct_disp = 0.0
 
-    warn_icon = " ⚠️" if warn_over and pct > 0.65 else (
-                " 🚨" if warn_over and pct > 1.0 else "")
+    # Order matters: the >1.0 case must be tested first, otherwise >0.65 always
+    # matches and 🚨 is unreachable — a hard overshoot looked identical to a mild one.
+    if not warn_over:
+        warn_icon = ""
+    elif pct > 1.0:
+        warn_icon = " 🚨"
+    elif pct > 0.65:
+        warn_icon = " ⚠️"
+    else:
+        warn_icon = ""
 
     bc, vc = st.columns([5, 2])
     bc.progress(min(pct, 1.0), text=f"{label}：**{value:.1f} {unit}**{warn_icon}")
