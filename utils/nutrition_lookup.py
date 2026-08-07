@@ -253,7 +253,14 @@ def lookup_ingredient(
         if row:
             return _row_to_nutrition(row)
 
-    # Tier 2: local_nutrition.json
+    # Tier 2: local_nutrition.json — deliberately NOT skipped by force_refresh.
+    # This file is the hand-curated correction layer that sits above USDA
+    # precisely because USDA's top hit is sometimes the wrong food (番茄 matches
+    # "Tomato powder" at 302 kcal against the real 18; 胡萝卜 matched "Carrot,
+    # dehydrated" at 341 against 41). Letting force_refresh fall through to USDA
+    # would overwrite those corrections with the very values they were written to
+    # fix. force_refresh only bypasses the SQLite cache; to change a curated
+    # entry, edit local_nutrition.json or use 「🗄️ 食材库」's edit table.
     local = _load_local()
     if name in local:
         entry = local[name]

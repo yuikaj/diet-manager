@@ -546,7 +546,12 @@ def _tab_lookup() -> None:
         placeholder="如：猪五花 / 西蓝花 / 三文鱼",
         label_visibility="collapsed",
     )
-    force_refresh = c2.checkbox("强制刷新", help="忽略缓存，重新查 USDA")
+    force_refresh = c2.checkbox(
+        "强制刷新",
+        help="忽略 SQLite 缓存重新查一次。注意：已在 local_nutrition.json 里人工"
+             "校正过的食材仍以该文件为准（它就是用来盖掉 USDA 错误匹配的），"
+             "要改这类食材请用下方「🗄️ 食材库」的编辑表格。",
+    )
     do_search     = c3.button("查询", use_container_width=True)
 
     if do_search and ing_input.strip():

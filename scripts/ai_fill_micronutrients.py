@@ -7,12 +7,20 @@ NULL。查询时 NULL 按 0 计入，于是「7日 DRI 热力图」上维A 常�
 按「菜谱累计用量」排序而不是字母序：用量高度集中，补几十种就能把加权覆盖率
 从 44% 拉到 80%+，不必等 300 多条全部跑完。
 
-查不到就跳过（保持 NULL），不写 0——写 0 会让「没数据」伪装成「确实不含」，
-既污染数据又虚报覆盖率。
+**默认只补主料（一级食材）**，跳过调料：调料占菜谱克重约 38%，但经
+condiment_ratio 折扣后实际摄入占比小得多，把配额花在生抽老抽上不划算。
+要连调料一起补加 `--all-ingredients`。
+
+**0 和 null 是两件事**：
+  - 「确实不含」→ 写 0。蔬菜水果谷物的维生素D 就是 0，这是真实数据。
+  - 「查不到 / 不确定」→ 保持 null。
+prompt 早期版本把两者都归为 null（"该食材本身不含此营养素时填 null"），
+结果跑维D 时模型对满屏蔬菜一律返回 null，一条都补不进去——而维D 恰好是
+缺口最大的那一项。UI 靠这个区分"确实没吃到"和"没有数据"。
 
 用法：
     python3.9 scripts/ai_fill_micronutrients.py --nutrient vita --top 40
-    python3.9 scripts/ai_fill_micronutrients.py --nutrient vita,magnesium,zinc --top 40
+    python3.9 scripts/ai_fill_micronutrients.py --nutrient vitd,vita,magnesium,zinc --top 60
     python3.9 scripts/ai_fill_micronutrients.py --nutrient vita --top 10 --dry-run
 """
 import argparse
@@ -46,20 +54,33 @@ _NUTRIENTS = {
 }
 
 
-def _ranked_targets(col: str, top: int) -> list:
-    """Ingredients missing this nutrient, ordered by total grams used in recipes."""
+# Recipe-import artefacts that aren't ingredients (mirrors views/nutrition.py).
+_JUNK_PREFIXES = ("步骤", "详见", "比例", "见步骤", "以上", "备注")
+_JUNK_EXACT = {"配菜", "食材", "主料", "辅料", "其他", "适量"}
+
+
+def _ranked_targets(col: str, top: int, mains_only: bool = True) -> list:
+    """Ingredients missing this nutrient, ordered by total grams used in recipes.
+
+    mains_only skips 调料: they are ~38% of recipe mass but a much smaller share
+    of what you actually absorb (condiment_ratio discounts them), and spending
+    the API budget on 生抽/老抽 instead of 一级农产品 is a poor trade.
+    """
+    cond_clause = "AND i.is_condiment = 0" if mains_only else ""
     conn = get_connection()
     try:
         rows = conn.execute(f"""
             SELECT i.name, SUM(i.amount) AS grams
             FROM ingredients i JOIN nutrition_cache n ON n.ingredient_name = i.name
-            WHERE i.unit = 'g' AND n.{col} IS NULL
+            WHERE i.unit = 'g' AND n.{col} IS NULL {cond_clause}
             GROUP BY i.name
             ORDER BY grams DESC
         """).fetchall()
     finally:
         conn.close()
-    return [(r["name"], r["grams"]) for r in rows[:top]]
+    out = [(r["name"], r["grams"]) for r in rows
+           if r["name"] not in _JUNK_EXACT and not r["name"].startswith(_JUNK_PREFIXES)]
+    return out[:top]
 
 
 _PROMPT = """你是营养数据专家。给出下列食材每 100g 的{cn}含量（单位 {unit}）。
@@ -70,7 +91,11 @@ _PROMPT = """你是营养数据专家。给出下列食材每 100g 的{cn}含量
 
 要求：
 - 生鲜食材按生重计
-- 确实查不到或该食材本身不含此营养素时填 null，不要猜 0
+- **确实不含该营养素 → 填 0**（例如蔬菜、水果、谷物的维生素D 就是 0，
+  植物性食物的维生素B12 也是 0）。这是真实数据，不是猜测。
+- **你无法确定、或查不到可靠来源 → 填 null**（不要为了填满而猜）
+  这两种情况必须分开：0 表示"确定不含"，null 表示"不知道"。UI 靠这个区分
+  "确实没吃到"和"没有数据"，混淆会让整条 DRI 进度条失去意义。
 - 不要任何解释文字或 markdown 包裹"""
 
 
@@ -91,6 +116,8 @@ def main() -> None:
                     help="逗号分隔，可选：" + "/".join(_NUTRIENTS))
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--all-ingredients", action="store_true",
+                    help="连调料一起补（默认只补主料/一级食材）")
     args = ap.parse_args()
 
     keys = [k.strip() for k in args.nutrient.split(",") if k.strip() in _NUTRIENTS]
@@ -101,7 +128,7 @@ def main() -> None:
     client = None
     for key in keys:
         col, unit, cn = _NUTRIENTS[key]
-        targets = _ranked_targets(col, args.top)
+        targets = _ranked_targets(col, args.top, mains_only=not args.all_ingredients)
         print(f"\n=== {cn} ({key}) ：待补 {len(targets)} 种 ===")
         if args.dry_run:
             for n, g in targets[:15]:
@@ -121,7 +148,7 @@ def main() -> None:
             try:
                 for item in _ask(client, key, chunk):
                     nm, val = item.get("name"), item.get(key)
-                    if nm and val is not None:
+                    if nm and val is not None:   # 0 是有效值，只有 None 表示未知
                         update_cached_nutrients(nm, {key: float(val)})
                         filled += 1
                     else:

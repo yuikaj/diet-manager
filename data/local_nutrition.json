@@ -1,5 +1,4 @@
 {
-  "_comment": "Local nutrition fallback for items not well-covered by USDA. All values per 100g.",
   "60%以上纯度黑巧克力": {
     "en_name": "Dark chocolate, 60% cacao solids",
     "per_100g": {
@@ -231,6 +230,7 @@
     "source": "web_estimate",
     "note": "Lee Kum Kee XO Sauce product label."
   },
+  "_comment": "Local nutrition fallback for items not well-covered by USDA. All values per 100g.",
   "baking soda": {
     "en_name": "Baking soda (Sodium Bicarbonate)",
     "per_100g": {
@@ -521,6 +521,27 @@
     "source": "usda",
     "note": "USDA FoodData Central (SR Legacy 16123) for Soy sauce, made from soy and wheat (shoyu)."
   },
+  "三文鱼": {
+    "en_name": "Fish, salmon, Atlantic, farmed, raw",
+    "per_100g": {
+      "kcal": 208,
+      "protein": 20.42,
+      "fat": 13.42,
+      "carbs": 0,
+      "sodium": 59,
+      "fiber": 0,
+      "vitc": 0,
+      "iron": 0.34,
+      "calcium": 9,
+      "potassium": 384,
+      "vitd": 10.9,
+      "vita": 13,
+      "magnesium": 27,
+      "zinc": 0.43
+    },
+    "source": "manual_verified",
+    "note": "原 USDA 自动匹配到 'Fish oil, salmon'（三文鱼油），已修正为三文鱼生鱼肉真实值。"
+  },
   "丘比芝麻酱": {
     "en_name": "Kewpie Deep-roasted Sesame Dressing",
     "per_100g": {
@@ -668,27 +689,6 @@
     "source": "usda",
     "note": "USDA FDC 170069 (Pork, fresh, belly, raw)"
   },
-  "五花肉碎": {
-    "en_name": "Pork belly, raw",
-    "per_100g": {
-      "kcal": 331.0,
-      "protein": 14.0,
-      "fat": 33.0,
-      "carbs": 0.0,
-      "sodium": 55.0,
-      "fiber": 0.0,
-      "vitc": 0.0,
-      "iron": 1.6,
-      "calcium": 15.0,
-      "potassium": 300.0,
-      "vitd": null,
-      "vita": null,
-      "magnesium": 12.0,
-      "zinc": 3.1
-    },
-    "source": "usda",
-    "note": "USDA FDC 170069 (Pork, fresh, belly, raw)"
-  },
   "五花肉/猪梅肉": {
     "en_name": "Pork shoulder butt, raw",
     "per_100g": {
@@ -751,6 +751,27 @@
     },
     "source": "usda",
     "note": "Same as Pork, fresh, belly, raw (USDA FDC 170069)"
+  },
+  "五花肉碎": {
+    "en_name": "Pork belly, raw",
+    "per_100g": {
+      "kcal": 331.0,
+      "protein": 14.0,
+      "fat": 33.0,
+      "carbs": 0.0,
+      "sodium": 55.0,
+      "fiber": 0.0,
+      "vitc": 0.0,
+      "iron": 1.6,
+      "calcium": 15.0,
+      "potassium": 300.0,
+      "vitd": null,
+      "vita": null,
+      "magnesium": 12.0,
+      "zinc": 3.1
+    },
+    "source": "usda",
+    "note": "USDA FDC 170069 (Pork, fresh, belly, raw)"
   },
   "五香粉": {
     "en_name": "Five-spice powder",
@@ -1125,27 +1146,6 @@
     },
     "source": "usda",
     "note": "参考USDA FoodData Central中硬豆腐 (Tofu, raw, firm, prepared with calcium sulfate) 条目"
-  },
-  "红酸汤": {
-    "en_name": "sour soup base",
-    "per_100g": {
-      "kcal": 20.0,
-      "protein": 1.3,
-      "fat": 0,
-      "carbs": 4.2,
-      "sodium": 2700,
-      "fiber": 0.0,
-      "vitc": 0.0,
-      "iron": 0,
-      "calcium": 0,
-      "potassium": null,
-      "vitd": null,
-      "vita": null,
-      "magnesium": null,
-      "zinc": null
-    },
-    "source": "手动输入",
-    "note": "手动输入"
   },
   "减脂马苏里拉": {
     "en_name": "Reduced-fat Mozzarella",
@@ -2109,6 +2109,27 @@
     "source": "web_estimate",
     "note": "参考条目: Otafuku Okonomi Sauce 营养数据"
   },
+  "大黄鱼": {
+    "en_name": "Large Yellow Croaker, raw",
+    "per_100g": {
+      "kcal": 169,
+      "protein": 16,
+      "fat": 10.1,
+      "carbs": 0.8,
+      "sodium": 71,
+      "fiber": 0.0,
+      "vitc": 0.0,
+      "iron": 0.9,
+      "calcium": 38.0,
+      "potassium": 280.0,
+      "vitd": null,
+      "vita": 10.0,
+      "magnesium": 20.0,
+      "zinc": 0.8
+    },
+    "source": "china_food_composition",
+    "note": "中国食物成分表 大黄鱼"
+  },
   "天妇罗虾": {
     "en_name": "Tempura Shrimp",
     "per_100g": {
@@ -2740,22 +2761,25 @@
     "note": "USDA FDC 170496 (Seaweed, wakame, raw)。维生素A为微克RAE。"
   },
   "干辣椒": {
-    "en_name": "Dried Chili Pepper",
+    "en_name": "Peppers, ancho, dried",
     "per_100g": {
-      "kcal": 40.0,
-      "protein": 1.87,
-      "fat": 0.44,
-      "carbs": 8.81,
-      "sodium": 27.0,
-      "fiber": 1.5,
-      "vitc": 144.0,
-      "iron": 3.1,
-      "calcium": 42.0,
-      "potassium": 966.0,
+      "kcal": 281.0,
+      "protein": 11.9,
+      "fat": 8.2,
+      "carbs": 51.4,
+      "sodium": 43.0,
+      "fiber": 21.6,
+      "vitc": 2.0,
+      "iron": 10.9,
+      "calcium": 61.0,
+      "potassium": 2410.0,
       "vitd": 0.0,
-      "vita": 144.0,
-      "magnesium": 69.0,
-      "zinc": 0.78
+      "vita": 1020.0,
+      "magnesium": 113.0,
+      "zinc": 1.42,
+      "satfat": 0.82,
+      "monofat": 0.492,
+      "polyfat": 4.51
     },
     "source": "usda",
     "note": "USDA FDC (Peppers, hot chili, red, raw)。维生素A为微克RAE。"
@@ -5318,27 +5342,6 @@
     "source": "usda",
     "note": "USDA FDC entry for generic vegetable oil."
   },
-  "炸鸡腿": {
-    "en_name": "Chicken Leg Drumstick And Thigh Fried Coated Skin / Coating Eaten",
-    "per_100g": {
-      "kcal": 350.0,
-      "protein": 25.7,
-      "fat": 23.2,
-      "carbs": 8.0,
-      "sodium": 476.6,
-      "fiber": 0.27,
-      "vitc": 0.0,
-      "iron": 1.7,
-      "calcium": 20.3,
-      "potassium": 276.8,
-      "vitd": 0.14,
-      "vita": null,
-      "magnesium": null,
-      "zinc": null
-    },
-    "source": "usda",
-    "note": "USDA FNNDS entry for Chicken Leg Drumstick And Thigh Fried Coated Skin / Coating Eaten"
-  },
   "炸鸡翅": {
     "en_name": "711 Spicy Chicken Wings (Breaded)",
     "per_100g": {
@@ -5359,6 +5362,27 @@
     },
     "source": "711 Canada (label data, converted per 100g)",
     "note": "Based on serving size 39g: 150 kcal, 12g fat, 5g carbs, 6g protein, 250mg sodium. Iron 2% DV = ~0.36mg per serving → 0.9mg/100g. Calcium 0%, VitA 0%, VitC 0%. Other micronutrients not provided."
+  },
+  "炸鸡腿": {
+    "en_name": "Chicken Leg Drumstick And Thigh Fried Coated Skin / Coating Eaten",
+    "per_100g": {
+      "kcal": 350.0,
+      "protein": 25.7,
+      "fat": 23.2,
+      "carbs": 8.0,
+      "sodium": 476.6,
+      "fiber": 0.27,
+      "vitc": 0.0,
+      "iron": 1.7,
+      "calcium": 20.3,
+      "potassium": 276.8,
+      "vitd": 0.14,
+      "vita": null,
+      "magnesium": null,
+      "zinc": null
+    },
+    "source": "usda",
+    "note": "USDA FNNDS entry for Chicken Leg Drumstick And Thigh Fried Coated Skin / Coating Eaten"
   },
   "炼乳": {
     "en_name": "Sweetened condensed milk",
@@ -5947,6 +5971,27 @@
     },
     "source": "usda",
     "note": "参考 USDA FDC, 接近条目 'Beef, chuck, short ribs, boneless, separable lean and fat, trimmed to 0\" fat, choice, raw' (FDC ID 170072 描述为 arm pot roast)"
+  },
+  "牛腩": {
+    "en_name": "Beef, brisket, flat half, boneless, raw",
+    "per_100g": {
+      "kcal": 169,
+      "protein": 20.15,
+      "fat": 9.86,
+      "carbs": 0,
+      "sodium": 79,
+      "fiber": 0,
+      "vitc": 0,
+      "iron": 2.0,
+      "calcium": 12,
+      "potassium": 300,
+      "vitd": null,
+      "vita": null,
+      "magnesium": 20,
+      "zinc": 4.0
+    },
+    "source": "manual_verified",
+    "note": "原 USDA 自动匹配到腌制熟玉米牛肉，钠被严重高估（973mg→79mg），已修正为生牛腩。"
   },
   "牛腱": {
     "en_name": "Beef (fore shank)",
@@ -7688,22 +7733,22 @@
     "note": "USDA FDC 168151"
   },
   "红枣干": {
-    "en_name": "Jujube, raw (for dried)",
+    "en_name": "Jujube, Chinese, fresh, dried",
     "per_100g": {
-      "kcal": 79.0,
-      "protein": 1.2,
-      "fat": 0.2,
-      "carbs": 20.23,
-      "sodium": 3.0,
+      "kcal": 281.0,
+      "protein": 4.72,
+      "fat": 0.5,
+      "carbs": 72.5,
+      "sodium": 5.0,
       "fiber": 6.0,
-      "vitc": 69.0,
-      "iron": 0.48,
-      "calcium": 21.0,
-      "potassium": 250.0,
+      "vitc": 218.0,
+      "iron": 5.09,
+      "calcium": 63.0,
+      "potassium": 217.0,
       "vitd": null,
       "vita": 2.0,
       "magnesium": 10.0,
-      "zinc": 0.05
+      "zinc": 0.39
     },
     "source": "usda",
     "note": "红枣干为加工品（脱水），根据查找规则使用新鲜红枣的营养数据。USDA FDC 168151"
@@ -7812,6 +7857,27 @@
     },
     "source": "web_estimate",
     "note": "参考条目 Queen's sweet potato starch"
+  },
+  "红酸汤": {
+    "en_name": "sour soup base",
+    "per_100g": {
+      "kcal": 20.0,
+      "protein": 1.3,
+      "fat": 0,
+      "carbs": 4.2,
+      "sodium": 2700,
+      "fiber": 0.0,
+      "vitc": 0.0,
+      "iron": 0,
+      "calcium": 0,
+      "potassium": null,
+      "vitd": null,
+      "vita": null,
+      "magnesium": null,
+      "zinc": null
+    },
+    "source": "手动输入",
+    "note": "手动输入"
   },
   "细砂糖": {
     "en_name": "Granulated sugar",
@@ -8417,6 +8483,27 @@
     },
     "source": "usda",
     "note": "USDA FDC 13983 (Beef, brisket, flat half, boneless, separable lean and fat, trimmed to 0\" fat, select, raw)"
+  },
+  "肥牛卷": {
+    "en_name": "Beef, plate/short plate, fatty, raw (hot pot slices)",
+    "per_100g": {
+      "kcal": 273,
+      "protein": 15.6,
+      "fat": 23.5,
+      "carbs": 0,
+      "sodium": 60,
+      "fiber": 0,
+      "vitc": 0,
+      "iron": 1.8,
+      "calcium": 10,
+      "potassium": 250,
+      "vitd": null,
+      "vita": null,
+      "magnesium": 18,
+      "zinc": 3.0
+    },
+    "source": "manual_verified",
+    "note": "原 USDA 自动匹配到 'Beef Pot Pie, frozen entree'（冷冻牛肉派），已按肥牛火锅片典型脂肪比例修正。"
   },
   "胡椒": {
     "en_name": "Spices, pepper, black",
@@ -9064,6 +9151,27 @@
     },
     "source": "web_estimate",
     "note": "参考条目: Gochujang Korean Chili Paste (ReciPal, per 100g). 钠含量假定为每100g"
+  },
+  "苹果": {
+    "en_name": "Apples, raw, with skin",
+    "per_100g": {
+      "kcal": 52,
+      "protein": 0.26,
+      "fat": 0.17,
+      "carbs": 13.81,
+      "sodium": 1,
+      "fiber": 2.4,
+      "vitc": 4.6,
+      "iron": 0.12,
+      "calcium": 6,
+      "potassium": 107,
+      "vitd": 0,
+      "vita": 3,
+      "magnesium": 5,
+      "zinc": 0.04
+    },
+    "source": "manual_verified",
+    "note": "原 USDA 自动匹配到 'Rose-apples, raw'（蒲桃/莲雾，非苹果），已修正为普通苹果（带皮）。"
   },
   "苹果酱": {
     "en_name": "Apple sauce",
@@ -9926,6 +10034,27 @@
     "source": "web_estimate",
     "note": "Processed food, kcal range 79-93 kcal/100g. Specific nutrient data for raw/fresh state not found. Average kcal used."
   },
+  "虾皮": {
+    "en_name": "Dried shrimp (small, salted)",
+    "per_100g": {
+      "kcal": 153,
+      "protein": 30.7,
+      "fat": 2.2,
+      "carbs": 2.5,
+      "sodium": 5057,
+      "fiber": 0,
+      "vitc": 0,
+      "iron": 6.7,
+      "calcium": 991,
+      "potassium": 617,
+      "vitd": null,
+      "vita": null,
+      "magnesium": 265,
+      "zinc": 1.93
+    },
+    "source": "manual_verified",
+    "note": "原 USDA 自动匹配到 'Litchis, dried'（荔枝干），已按中国食物成分表虾皮典型值（高钙高钠）修正。"
+  },
   "虾米": {
     "en_name": "Shrimp, dried",
     "per_100g": {
@@ -10257,6 +10386,48 @@
     },
     "source": "manual_estimate",
     "note": "钠含量极高，注意用量。参考郫县豆瓣酱包装标注"
+  },
+  "豆腐皮": {
+    "en_name": "Tofu skin, dried (yuba)",
+    "per_100g": {
+      "kcal": 530,
+      "protein": 50.4,
+      "fat": 32.1,
+      "carbs": 7.2,
+      "sodium": null,
+      "fiber": 3.0,
+      "vitc": null,
+      "iron": null,
+      "calcium": null,
+      "potassium": null,
+      "vitd": null,
+      "vita": null,
+      "magnesium": null,
+      "zinc": null
+    },
+    "source": "manual_verified",
+    "note": "原 USDA 自动匹配到 'Tofu yogurt'（豆腐酸奶），已按干豆腐皮/腐竹典型值修正。"
+  },
+  "豆苗": {
+    "en_name": "Pea shoots, raw",
+    "per_100g": {
+      "kcal": 35,
+      "protein": 4.8,
+      "fat": 0.5,
+      "carbs": 4.3,
+      "sodium": 6,
+      "fiber": 2.0,
+      "vitc": 50,
+      "iron": 2.0,
+      "calcium": 45,
+      "potassium": 200,
+      "vitd": null,
+      "vita": 200,
+      "magnesium": 25,
+      "zinc": 0.5
+    },
+    "source": "manual_verified",
+    "note": "原 USDA 自动匹配到 'Bamboo shoots, raw'（竹笋），已按豆苗（豌豆苗）典型值修正。"
   },
   "豆豉": {
     "en_name": "Fermented Black Beans (Douchi)",
@@ -10866,6 +11037,27 @@
     },
     "source": "web_estimate",
     "note": "参考农业知识入口网的金针乾品数据，并补充其他中文来源数据，维生素A为胡萝卜素折算RAE"
+  },
+  "金鲳鱼": {
+    "en_name": "Pomfret, raw",
+    "per_100g": {
+      "kcal": 106,
+      "protein": 20.3,
+      "fat": 2.6,
+      "carbs": 0,
+      "sodium": 65,
+      "fiber": 0,
+      "vitc": 0,
+      "iron": 1.0,
+      "calcium": 30,
+      "potassium": 320,
+      "vitd": null,
+      "vita": null,
+      "magnesium": 25,
+      "zinc": 0.5
+    },
+    "source": "manual_verified",
+    "note": "原 USDA 自动匹配到 'Raisins, golden, seedless'（葡萄干），已按白肉海鱼典型值人工修正。"
   },
   "陈皮": {
     "en_name": "Dried tangerine peel",
@@ -12186,27 +12378,6 @@
     "source": "web_estimate",
     "note": "鸡汤料为加工调味品，无新鲜/生/原始状态数据。"
   },
-  "黑莓": {
-    "en_name": "Blackberry, raw",
-    "per_100g": {
-      "kcal": 43.0,
-      "protein": 1.39,
-      "fat": 0.49,
-      "carbs": 9.61,
-      "sodium": 1.0,
-      "fiber": 5.3,
-      "vitc": 20.97,
-      "iron": 0.62,
-      "calcium": 29.0,
-      "potassium": 162.0,
-      "vitd": null,
-      "vita": 11.0,
-      "magnesium": 20.0,
-      "zinc": 0.53
-    },
-    "source": "USDA FoodData Central",
-    "note": "新鲜生黑莓"
-  },
   "鸡油菌": {
     "en_name": "Mushrooms, Chanterelle, raw",
     "per_100g": {
@@ -12619,27 +12790,6 @@
     "source": "china_food_composition",
     "note": "中国食物成分表 大黄鱼"
   },
-  "大黄鱼": {
-    "en_name": "Large Yellow Croaker, raw",
-    "per_100g": {
-      "kcal": 169,
-      "protein": 16,
-      "fat": 10.1,
-      "carbs": 0.8,
-      "sodium": 71,
-      "fiber": 0.0,
-      "vitc": 0.0,
-      "iron": 0.9,
-      "calcium": 38.0,
-      "potassium": 280.0,
-      "vitd": null,
-      "vita": 10.0,
-      "magnesium": 20.0,
-      "zinc": 0.8
-    },
-    "source": "china_food_composition",
-    "note": "中国食物成分表 大黄鱼"
-  },
   "黄鳝丝": {
     "en_name": "Rice paddy eel strips",
     "per_100g": {
@@ -12783,6 +12933,27 @@
     "source": "usda",
     "note": "USDA FDC 170490. \"Black goat\" refers to breed, nutritional data for general goat meat used."
   },
+  "黑莓": {
+    "en_name": "Blackberry, raw",
+    "per_100g": {
+      "kcal": 43.0,
+      "protein": 1.39,
+      "fat": 0.49,
+      "carbs": 9.61,
+      "sodium": 1.0,
+      "fiber": 5.3,
+      "vitc": 20.97,
+      "iron": 0.62,
+      "calcium": 29.0,
+      "potassium": 162.0,
+      "vitd": null,
+      "vita": 11.0,
+      "magnesium": 20.0,
+      "zinc": 0.53
+    },
+    "source": "USDA FoodData Central",
+    "note": "新鲜生黑莓"
+  },
   "黑辛拉面": {
     "en_name": "Nongshim Shin Ramyun Black (dry noodles with seasoning)",
     "per_100g": {
@@ -12908,173 +13079,5 @@
     },
     "source": "usda",
     "note": "USDA FDC SR Legacy 15160: Crustaceans, lobster, northern, raw."
-  },
-  "金鲳鱼": {
-    "en_name": "Pomfret, raw",
-    "per_100g": {
-      "kcal": 106,
-      "protein": 20.3,
-      "fat": 2.6,
-      "carbs": 0,
-      "sodium": 65,
-      "fiber": 0,
-      "vitc": 0,
-      "iron": 1.0,
-      "calcium": 30,
-      "potassium": 320,
-      "vitd": null,
-      "vita": null,
-      "magnesium": 25,
-      "zinc": 0.5
-    },
-    "source": "manual_verified",
-    "note": "原 USDA 自动匹配到 'Raisins, golden, seedless'（葡萄干），已按白肉海鱼典型值人工修正。"
-  },
-  "虾皮": {
-    "en_name": "Dried shrimp (small, salted)",
-    "per_100g": {
-      "kcal": 153,
-      "protein": 30.7,
-      "fat": 2.2,
-      "carbs": 2.5,
-      "sodium": 5057,
-      "fiber": 0,
-      "vitc": 0,
-      "iron": 6.7,
-      "calcium": 991,
-      "potassium": 617,
-      "vitd": null,
-      "vita": null,
-      "magnesium": 265,
-      "zinc": 1.93
-    },
-    "source": "manual_verified",
-    "note": "原 USDA 自动匹配到 'Litchis, dried'（荔枝干），已按中国食物成分表虾皮典型值（高钙高钠）修正。"
-  },
-  "豆苗": {
-    "en_name": "Pea shoots, raw",
-    "per_100g": {
-      "kcal": 35,
-      "protein": 4.8,
-      "fat": 0.5,
-      "carbs": 4.3,
-      "sodium": 6,
-      "fiber": 2.0,
-      "vitc": 50,
-      "iron": 2.0,
-      "calcium": 45,
-      "potassium": 200,
-      "vitd": null,
-      "vita": 200,
-      "magnesium": 25,
-      "zinc": 0.5
-    },
-    "source": "manual_verified",
-    "note": "原 USDA 自动匹配到 'Bamboo shoots, raw'（竹笋），已按豆苗（豌豆苗）典型值修正。"
-  },
-  "豆腐皮": {
-    "en_name": "Tofu skin, dried (yuba)",
-    "per_100g": {
-      "kcal": 530,
-      "protein": 50.4,
-      "fat": 32.1,
-      "carbs": 7.2,
-      "sodium": null,
-      "fiber": 3.0,
-      "vitc": null,
-      "iron": null,
-      "calcium": null,
-      "potassium": null,
-      "vitd": null,
-      "vita": null,
-      "magnesium": null,
-      "zinc": null
-    },
-    "source": "manual_verified",
-    "note": "原 USDA 自动匹配到 'Tofu yogurt'（豆腐酸奶），已按干豆腐皮/腐竹典型值修正。"
-  },
-  "肥牛卷": {
-    "en_name": "Beef, plate/short plate, fatty, raw (hot pot slices)",
-    "per_100g": {
-      "kcal": 273,
-      "protein": 15.6,
-      "fat": 23.5,
-      "carbs": 0,
-      "sodium": 60,
-      "fiber": 0,
-      "vitc": 0,
-      "iron": 1.8,
-      "calcium": 10,
-      "potassium": 250,
-      "vitd": null,
-      "vita": null,
-      "magnesium": 18,
-      "zinc": 3.0
-    },
-    "source": "manual_verified",
-    "note": "原 USDA 自动匹配到 'Beef Pot Pie, frozen entree'（冷冻牛肉派），已按肥牛火锅片典型脂肪比例修正。"
-  },
-  "三文鱼": {
-    "en_name": "Fish, salmon, Atlantic, farmed, raw",
-    "per_100g": {
-      "kcal": 208,
-      "protein": 20.42,
-      "fat": 13.42,
-      "carbs": 0,
-      "sodium": 59,
-      "fiber": 0,
-      "vitc": 0,
-      "iron": 0.34,
-      "calcium": 9,
-      "potassium": 384,
-      "vitd": 10.9,
-      "vita": 13,
-      "magnesium": 27,
-      "zinc": 0.43
-    },
-    "source": "manual_verified",
-    "note": "原 USDA 自动匹配到 'Fish oil, salmon'（三文鱼油），已修正为三文鱼生鱼肉真实值。"
-  },
-  "牛腩": {
-    "en_name": "Beef, brisket, flat half, boneless, raw",
-    "per_100g": {
-      "kcal": 169,
-      "protein": 20.15,
-      "fat": 9.86,
-      "carbs": 0,
-      "sodium": 79,
-      "fiber": 0,
-      "vitc": 0,
-      "iron": 2.0,
-      "calcium": 12,
-      "potassium": 300,
-      "vitd": null,
-      "vita": null,
-      "magnesium": 20,
-      "zinc": 4.0
-    },
-    "source": "manual_verified",
-    "note": "原 USDA 自动匹配到腌制熟玉米牛肉，钠被严重高估（973mg→79mg），已修正为生牛腩。"
-  },
-  "苹果": {
-    "en_name": "Apples, raw, with skin",
-    "per_100g": {
-      "kcal": 52,
-      "protein": 0.26,
-      "fat": 0.17,
-      "carbs": 13.81,
-      "sodium": 1,
-      "fiber": 2.4,
-      "vitc": 4.6,
-      "iron": 0.12,
-      "calcium": 6,
-      "potassium": 107,
-      "vitd": 0,
-      "vita": 3,
-      "magnesium": 5,
-      "zinc": 0.04
-    },
-    "source": "manual_verified",
-    "note": "原 USDA 自动匹配到 'Rose-apples, raw'（蒲桃/莲雾，非苹果），已修正为普通苹果（带皮）。"
   }
 }
