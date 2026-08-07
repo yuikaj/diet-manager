@@ -1702,13 +1702,20 @@ def _log_meal_sources(log: dict) -> list:
 
 
 # Nutrients worth asking "where did this come from?" about, with display units.
+# The fat breakdown is listed alongside total fat: "脂肪 62g" rarely tells you
+# what to change, while "牛奶贡献了一半的饱和脂肪" does.
 _ATTRIB_CHOICES = [
     ("satfat", "饱和脂肪", "g"), ("kcal", "热量", "kcal"), ("protein", "蛋白质", "g"),
-    ("fat", "脂肪", "g"), ("carbs", "碳水", "g"), ("sodium", "钠", "mg"),
+    ("fat", "脂肪（总）", "g"), ("monofat", "单不饱和脂肪", "g"),
+    ("polyfat", "多不饱和脂肪", "g"),
+    ("carbs", "碳水", "g"), ("sodium", "钠", "mg"),
     ("fiber", "膳食纤维", "g"), ("calcium", "钙", "mg"), ("iron", "铁", "mg"),
     ("vita", "维生素A", "µg"), ("vitd", "维生素D", "µg"),
     ("magnesium", "镁", "mg"), ("zinc", "锌", "mg"), ("potassium", "钾", "mg"),
 ]
+# Shown as DRI bars; the rest of _ATTRIB_CHOICES is attribution-only. 单/多不饱和
+# have no target to hit — they are read as a share of total fat, not a goal.
+_BAR_SKIP = {"monofat", "polyfat"}
 
 
 def _attribute_nutrient(sources: list, key: str) -> tuple:
@@ -1768,7 +1775,7 @@ def _day_detail(log: dict) -> None:
     with st.expander("📊 当日 DRI 达成率", expanded=False):
         st.caption("对照的是**当前**设置的热量目标与供能比；改设置后这里会跟着变。")
         for key, label, unit in _ATTRIB_CHOICES:
-            if key not in stored:
+            if key not in stored or key in _BAR_SKIP:
                 continue
             target = dri.get(key)
             if key == "satfat":

@@ -5658,24 +5658,27 @@
     "note": "USDA FDC entry for beef, rib, shortribs, separable lean and fat, choice, raw."
   },
   "牛奶": {
-    "en_name": "Milk, whole, 3.25% milkfat",
+    "en_name": "2% ultrafiltered milk (product label, per 240 ml)",
     "per_100g": {
-      "kcal": 61.0,
-      "protein": 3.15,
-      "fat": 3.27,
-      "carbs": 4.78,
-      "sodium": 105.0,
+      "kcal": 54.17,
+      "protein": 5.42,
+      "fat": 2.5,
+      "carbs": 2.5,
+      "sodium": 27.08,
       "fiber": 0.0,
       "vitc": 0.0,
       "iron": 0.0,
-      "calcium": 280.0,
-      "potassium": 320.0,
-      "vitd": 0.1,
-      "vita": 120.0,
+      "calcium": 178.75,
+      "potassium": 76.67,
+      "vitd": 1.25,
+      "vita": 77.92,
       "magnesium": 25.0,
-      "zinc": 0.9
+      "zinc": 0.9,
+      "satfat": 1.25,
+      "monofat": null,
+      "polyfat": null
     },
-    "source": "usda",
+    "source": "product_label",
     "note": "USDA FDC entry for whole milk, 3.25% milkfat, without added vitamin A and D."
   },
   "牛奶或淡奶油": {
