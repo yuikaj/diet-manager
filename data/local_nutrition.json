@@ -6530,7 +6530,11 @@
       "vitc": 14,
       "iron": 0.3,
       "calcium": 10,
-      "potassium": 237
+      "potassium": 237,
+      "vitd": 0.0,
+      "vita": 42.0,
+      "magnesium": 11.0,
+      "zinc": 0.17
     },
     "source": "usda_verified",
     "note": "USDA FDC 170457 新鲜番茄。翻译查询容易返回 Tomato powder（302kcal），改用本地数据"

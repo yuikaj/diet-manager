@@ -737,7 +737,10 @@ def _ai_query_nutrition(raw_input: str, use_grounding: bool = True) -> list:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 【输出 JSON 数组】每个元素：
 {{
-  "name": "食材标准中文名",
+  "name": "**原样照抄输入里的食材名**，不要改写、不要加括号说明、不要换成学名。
+           （输入「豆芽」就返回「豆芽」，不要返回「绿豆芽(生)」——这个名字要
+             和菜谱里的食材名逐字匹配才能被查到，改了就永远匹配不上。
+             品类判断写进 source_note，不要写进 name）",
   "en_name": "English name 或 null",
   "kcal": 数值, "protein": 数值, "fat": 数值, "carbs": 数值,
   "sodium": 数值, "fiber": 数值,
@@ -770,6 +773,21 @@ satfat/monofat/polyfat = 饱和/单不饱和/多不饱和脂肪，三者之和�
         contents=prompt,
         config=cfg,
     )
+    # resp.text is None when the model produced no text part — most often the
+    # answer hit the output limit (17 nutrients × many ingredients is a long
+    # JSON), sometimes a safety stop. Calling .strip() on it surfaced in the UI
+    # as "'NoneType' object has no attribute 'strip'", which says nothing about
+    # what to do next.
+    if not resp.text:
+        reason = ""
+        try:
+            reason = str(resp.candidates[0].finish_reason)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"模型没有返回内容（finish_reason={reason or '未知'}）。"
+            "食材太多时输出会被截断——请分几次录入，每次 5 种左右。"
+        )
     text = resp.text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
