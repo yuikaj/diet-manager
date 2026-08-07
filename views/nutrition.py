@@ -2,7 +2,7 @@
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import streamlit as st
@@ -1653,6 +1653,165 @@ _HISTORY_DRI = [
 ]
 
 
+def _log_meal_sources(log: dict) -> list:
+    """Rebuild a logged day's meals as (label, ingredients, divisor) triples.
+
+    Everything needed is already stored: breakfast/lunch mode + custom lists,
+    dinner_recipe_ids, dinner_staple, and the fruit list in dinner_placeholder.
+    Dinner dishes are cooked for two, hence divisor 2 — same rule as
+    compute_fullday_silent, just replayed from the record instead of session state.
+
+    One thing the log does NOT keep with amounts is 临时加菜 (they only reach
+    ingredients_snapshot as bare names), so a reconstruction can come out lower
+    than the stored total. The detail view reports that difference rather than
+    quietly showing the smaller number.
+    """
+    out = []
+    for label, col, default_ings in (("🌅 早餐", "breakfast", _BFST_INGS),
+                                     ("🕛 午餐", "lunch",     _LUNCH_INGS)):
+        raw = log.get(col)
+        if not raw:
+            # No stored blob at all — genuinely unknown. Falling back to "default"
+            # here would invent a breakfast for a day that recorded none.
+            continue
+        blob = json.loads(raw)
+        mode = blob.get("mode", "default")
+        if mode == "skip":
+            continue
+        ings = blob.get("custom") if mode == "custom" else default_ings
+        if ings:
+            out.append((label, ings, 1.0))
+
+    extra = json.loads(log.get("dinner_placeholder") or "{}")
+    fruits, fruit_g = extra.get("fruits") or [], float(extra.get("fruit_g_each") or 65)
+    if fruits:
+        out.append(("🍎 水果",
+                    [{"name": f, "amount": fruit_g, "unit": "g", "intake_ratio": 1.0}
+                     for f in fruits], 1.0))
+
+    for rid in json.loads(log.get("dinner_recipe_ids") or "[]"):
+        r = get_recipe(rid)
+        if r is None:
+            continue
+        out.append((f"🌙 {r['name']}", recipe_ings_for_two(rid, r), 2.0))
+
+    staple = json.loads(log.get("dinner_staple") or "[]")
+    if staple:
+        out.append(("🍚 主食", staple, 1.0))
+    return out
+
+
+# Nutrients worth asking "where did this come from?" about, with display units.
+_ATTRIB_CHOICES = [
+    ("satfat", "饱和脂肪", "g"), ("kcal", "热量", "kcal"), ("protein", "蛋白质", "g"),
+    ("fat", "脂肪", "g"), ("carbs", "碳水", "g"), ("sodium", "钠", "mg"),
+    ("fiber", "膳食纤维", "g"), ("calcium", "钙", "mg"), ("iron", "铁", "mg"),
+    ("vita", "维生素A", "µg"), ("vitd", "维生素D", "µg"),
+    ("magnesium", "镁", "mg"), ("zinc", "锌", "mg"), ("potassium", "钾", "mg"),
+]
+
+
+def _attribute_nutrient(sources: list, key: str) -> tuple:
+    """Per-ingredient contribution of one nutrient. Returns (rows, total, uncovered).
+
+    `uncovered` lists ingredients carrying the parent nutrient but no data for
+    this one — for 饱和脂肪 that is the difference between "you ate little" and
+    "we can't see it", which is the whole reason this view exists.
+    """
+    rows, total, uncovered = [], 0.0, []
+    for label, ings, div in sources:
+        for ing in ings:
+            grams = to_grams(ing.get("amount"), ing.get("unit", "g"))
+            if not grams:
+                continue
+            grams = grams * float(ing.get("intake_ratio", 1.0)) / div
+            n = lookup_ingredient(ing["name"])
+            if n is None:
+                continue
+            val = getattr(n, key, None)
+            if val is None:
+                if (n.fat or 0) > 0 and key in ("satfat", "monofat", "polyfat"):
+                    uncovered.append((ing["name"], label, (n.fat or 0) * grams / 100))
+                continue
+            amount = val * grams / 100.0
+            if amount > 0:
+                # Condiments land well under 1 g per person after the ÷2; "%.0f"
+                # rendered those as "0 g" next to a real sodium figure.
+                qty = f"{grams:.0f} g" if grams >= 10 else f"{grams:.1f} g"
+                rows.append({"食材": ing["name"], "餐次": label,
+                             "用量": qty, "_v": amount})
+                total += amount
+    rows.sort(key=lambda r: -r["_v"])
+    return rows, total, uncovered
+
+
+def _day_detail(log: dict) -> None:
+    """Full breakdown of one logged day."""
+    stored = json.loads(log["total_nutrients_json"]) if log.get("total_nutrients_json") else {}
+    sources = _log_meal_sources(log)
+
+    st.markdown(f"#### 📅 {log['date']}")
+    if not sources:
+        st.info("这条记录没有可还原的餐次明细（可能保存时早午餐都跳过且没有晚餐菜谱）。")
+
+    labels = [lbl for lbl, _, _ in sources]
+    st.caption("　·　".join(labels) if labels else "—")
+
+    mc = st.columns(4)
+    mc[0].metric("热量",   f"{stored.get('kcal', 0):.0f} kcal")
+    mc[1].metric("蛋白质", f"{stored.get('protein', 0):.1f} g")
+    mc[2].metric("脂肪",   f"{stored.get('fat', 0):.1f} g")
+    mc[3].metric("碳水",   f"{stored.get('carbs', 0):.1f} g")
+
+    # DRI bars against today's targets, from the stored totals
+    dri = _dri()
+    with st.expander("📊 当日 DRI 达成率", expanded=False):
+        st.caption("对照的是**当前**设置的热量目标与供能比；改设置后这里会跟着变。")
+        for key, label, unit in _ATTRIB_CHOICES:
+            if key not in stored:
+                continue
+            target = dri.get(key)
+            if key == "satfat":
+                target = dri["kcal"] * _SATFAT_ENERGY_LIMIT / 9.0
+            if not target:
+                continue
+            _bar(label, float(stored.get(key) or 0), target, unit,
+                 warn_over=key in ("sodium", "satfat"))
+
+    # Where did nutrient X come from?
+    st.markdown("**🔍 某个营养素来自哪些食材**")
+    opts = [(k, cn, u) for k, cn, u in _ATTRIB_CHOICES if k in stored or not stored]
+    sel = st.selectbox(
+        "看哪一项", opts, format_func=lambda x: x[1],
+        key=f"detail_nutr_{log['date']}", label_visibility="collapsed",
+    )
+    key, cn, unit = sel
+    rows, total, uncovered = _attribute_nutrient(sources, key)
+    if not rows:
+        st.caption(f"没有食材记录到{cn}。")
+        return
+
+    for r in rows:
+        r[cn] = f"{r['_v']:.2f} {unit}"
+        r["占比"] = f"{100 * r['_v'] / total:.0f}%"
+    st.dataframe([{k: v for k, v in r.items() if k != "_v"} for r in rows][:15],
+                 use_container_width=True, hide_index=True)
+
+    saved = float(stored.get(key) or 0)
+    st.caption(f"逐食材合计 **{total:.1f} {unit}**　·　保存时记录的是 **{saved:.1f} {unit}**")
+    if saved and abs(total - saved) / max(saved, 1e-9) > 0.05:
+        st.caption(
+            "　⚠️ 两者不一致。明细是用**现在**的食材营养库重算的，"
+            "而记录里存的是当天保存那一刻的值——中间补过或修正过食材数据就会差。"
+            "另外「临时加菜」只在记录里留下了名字、没留克重，无法还原。"
+        )
+    if uncovered:
+        tot_fat = sum(f for _, _, f in uncovered)
+        st.caption(f"　⚠️ 另有 {len(uncovered)} 种食材含脂肪共 {tot_fat:.1f} g 但没有细分数据，"
+                   f"未计入上表：{'、'.join(n for n, _, _ in uncovered[:6])}"
+                   + ("…" if len(uncovered) > 6 else ""))
+
+
 def _tab_history() -> None:
     logs = get_recent_logs_full(14)
     if not logs:
@@ -1660,7 +1819,14 @@ def _tab_history() -> None:
         return
 
     # ── Recent log table ──────────────────────────────────────
-    st.caption(f"最近 {len(logs)} 天记录")
+    # "最近 N 天" was wrong: these are the most recent N *records*, which can be
+    # scattered over months. Say which it is.
+    span = ""
+    if len(logs) > 1:
+        d0 = datetime.strptime(logs[-1]["date"], "%Y-%m-%d").date()
+        d1 = datetime.strptime(logs[0]["date"], "%Y-%m-%d").date()
+        span = f"，跨 {(d1 - d0).days + 1} 天"
+    st.caption(f"最近 {len(logs)} 次记录{span}")
     tbl_keys  = ["date", "total_kcal", "total_protein", "total_fat", "total_carbs", "total_sodium", "total_fiber"]
     tbl_heads = ["日期", "热量(kcal)", "蛋白质(g)", "脂肪(g)", "碳水(g)", "钠(mg)", "纤维(g)"]
     rows = []
@@ -1680,9 +1846,25 @@ def _tab_history() -> None:
         st.line_chart({"热量(kcal)": kcals, "蛋白质×10(g)": [p * 10 for p in prots]})
 
     # ── 7-day analysis ────────────────────────────────────────
-    recent_7 = logs[:7]
+    # An actual calendar window, not logs[:7]. Taking the last seven *records*
+    # silently presented months of sporadic logging as "近7日" — with 9 records
+    # spread over three months, "近7日" covered 89 days, and "每日平均食材"
+    # divided by the number of records rather than the number of days.
+    _WINDOW_DAYS = 7
+    today = datetime.now().date()
+    start = today - timedelta(days=_WINDOW_DAYS - 1)
+    recent_7 = [l for l in logs
+                if start <= datetime.strptime(l["date"], "%Y-%m-%d").date() <= today]
+
     st.divider()
-    st.subheader("🔬 近7日分析")
+    st.subheader(f"🔬 近{_WINDOW_DAYS}日分析")
+    st.caption(f"{start:%Y-%m-%d} ~ {today:%Y-%m-%d} 这 {_WINDOW_DAYS} 天里，"
+               f"有 **{len(recent_7)}** 天留下了记录。下面的统计只基于这几天。")
+    if not recent_7:
+        st.info(f"最近 {_WINDOW_DAYS} 天没有记录。上方表格是更早的历史，"
+                "可在下方「📖 单日详情」里查看任意一天。")
+        _history_detail_picker(logs)
+        return
 
     # Ingredient diversity (only from logs that have snapshot)
     with_snap = [l for l in recent_7 if l.get("ingredients_snapshot")]
@@ -1704,7 +1886,10 @@ def _tab_history() -> None:
         mc = st.columns(3)
         mc[0].metric("食材种类（合计）", f"{len(unique_ings)} 种")
         mc[1].metric("水果种类（合计）", f"{len(unique_fruits)} 种")
-        mc[2].metric("每日平均食材",     f"{avg_per_day:.1f} 种")
+        # Per *recorded* day, not per calendar day — averaging over days you
+        # never logged would just report how often you forget to save.
+        mc[2].metric("每次记录平均食材", f"{avg_per_day:.1f} 种",
+                     help=f"分母是有记录的 {len(with_snap)} 天，不是 {_WINDOW_DAYS} 天")
 
         if unique_ings:
             with st.expander(f"📋 食材清单（{len(unique_ings)} 种）"):
@@ -1752,6 +1937,21 @@ def _tab_history() -> None:
 
     st.dataframe(dri_rows, use_container_width=True, hide_index=True)
     st.caption("✅ ≥80% DRI · 🟡 50–79% · 🔴 <50%　（钠反向：✅ <65% · 🟡 65–99% · 🔴 ≥100%）")
+
+    _history_detail_picker(logs)
+
+
+def _history_detail_picker(logs: list) -> None:
+    """Pick any logged day and drill into it."""
+    st.divider()
+    st.subheader("📖 单日详情")
+    by_date = {l["date"]: l for l in logs}
+    sel = st.selectbox(
+        "选择日期", list(by_date.keys()),
+        key="hist_detail_date", label_visibility="collapsed",
+    )
+    if sel:
+        _day_detail(by_date[sel])
 
 
 # ── Entry point ───────────────────────────────────────────────

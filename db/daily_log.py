@@ -105,12 +105,20 @@ def get_recent_logs(n: int = 14) -> list:
 
 
 def get_recent_logs_full(n: int = 14) -> list:
-    """Return recent logs including snapshot and full nutrient JSON for 7-day analysis."""
+    """Recent logs with everything needed to rebuild a day's meals.
+
+    The meal columns (breakfast / lunch / dinner_recipe_ids / dinner_staple /
+    dinner_placeholder) used to be left out. That was invisible while the caller
+    only drew charts, but the 单日详情 view reconstructs meals from them — and a
+    missing `breakfast` column reads as "mode: default", so a day where breakfast
+    was skipped would be shown, and attributed, as if it had been eaten.
+    """
     conn = get_connection()
     try:
         rows = conn.execute(
             "SELECT date, total_kcal, total_protein, total_fat, total_carbs, "
-            "total_sodium, total_fiber, total_nutrients_json, ingredients_snapshot "
+            "total_sodium, total_fiber, total_nutrients_json, ingredients_snapshot, "
+            "breakfast, lunch, dinner_recipe_ids, dinner_staple, dinner_placeholder "
             "FROM daily_logs ORDER BY date DESC LIMIT ?",
             (n,),
         ).fetchall()
