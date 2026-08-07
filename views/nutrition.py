@@ -1285,36 +1285,69 @@ def remember_fd_state() -> None:
 
 
 def compute_fullday_silent() -> dict:
-    """Pure compute: reads session state, returns full-day nutrition dict.
+    """Full-day nutrition from the live 备餐控制台 widgets.
 
-    Callable from any page — e.g., plan.py uses it to JIT-compute PDF nutrition
-    without forcing the user to visit the 营养分析 tab first.
+    A thin adapter: it reads session state, then hands explicit values to
+    compute_fullday(). Anything that needs to score a day it isn't currently
+    holding in widgets — the 单日详情 editor, a backfill — calls compute_fullday()
+    directly, so there is exactly one implementation of the arithmetic.
     """
     restore_fd_state()   # the控制台 widgets may have been GC'd by a page switch
-    zero = {k: 0.0 for k in _NUTR_KEYS}
 
-    bfst_skip        = st.session_state.get("fd_bfst_skip", False)
-    bfst_custom_txt  = st.session_state.get("fd_bfst_custom_txt", "").strip()
-    lunch_skip       = st.session_state.get("fd_lunch_skip", False)
-    lunch_custom_txt = st.session_state.get("fd_lunch_custom_txt", "").strip()
-    staple_choice    = st.session_state.get("fd_staple_choice", "🍚 白米饭")
-    staple_g         = int(st.session_state.get("fd_staple_g", 100))
+    bfst_skip         = st.session_state.get("fd_bfst_skip", False)
+    bfst_custom_txt   = st.session_state.get("fd_bfst_custom_txt", "").strip()
+    lunch_skip        = st.session_state.get("fd_lunch_skip", False)
+    lunch_custom_txt  = st.session_state.get("fd_lunch_custom_txt", "").strip()
+    staple_choice     = st.session_state.get("fd_staple_choice", "🍚 白米饭")
+    staple_g          = int(st.session_state.get("fd_staple_g", 100))
     staple_custom_txt = st.session_state.get("fd_staple_custom_txt", "").strip()
-    sel_fruits       = list(st.session_state.get("fd_fruits", []))
-    fruit_g          = int(st.session_state.get("fd_fruit_g", 65))
-    rids             = list(st.session_state.get("plan_rids", []))
-    dinner_addons_txt= st.session_state.get("fd_dinner_addons_txt", "").strip()
-    # 「✏️ 临时占位菜」from 今日规划. Same shape as _parse_placeholder output and
-    # likewise cooked for two, so it joins dinner_ings and gets halved below.
-    # Without this a placeholder-only dinner (乱炖 etc.) never reached daily_logs.
-    plan_ph          = list(st.session_state.get("plan_ph", []))
+    dinner_addons_txt = st.session_state.get("fd_dinner_addons_txt", "").strip()
+
+    staple_ings = []
+    if staple_choice == "🍚 白米饭":
+        staple_ings = [{"name": "米饭", "amount": float(staple_g), "unit": "g",
+                        "intake_ratio": 1.0}]
+    elif staple_choice == "✏️ 自定义" and staple_custom_txt:
+        staple_ings = _parse_placeholder(staple_custom_txt)
+
+    return compute_fullday(
+        bfst_skip=bfst_skip,
+        bfst_custom_ings=_parse_placeholder(bfst_custom_txt) if bfst_custom_txt else None,
+        lunch_skip=lunch_skip,
+        lunch_custom_ings=_parse_placeholder(lunch_custom_txt) if lunch_custom_txt else None,
+        fruits=list(st.session_state.get("fd_fruits", [])),
+        fruit_g=int(st.session_state.get("fd_fruit_g", 65)),
+        rids=list(st.session_state.get("plan_rids", [])),
+        # 「✏️ 临时占位菜」from 今日规划 — cooked for two like the dishes, so it
+        # joins dinner_ings and is halved with them.
+        plan_ph=list(st.session_state.get("plan_ph", [])),
+        addon_ings=_parse_placeholder(dinner_addons_txt) if dinner_addons_txt else [],
+        staple_ings=staple_ings,
+    )
+
+
+def compute_fullday(*, bfst_skip=False, bfst_custom_ings=None,
+                    lunch_skip=False, lunch_custom_ings=None,
+                    fruits=None, fruit_g=65, rids=None, plan_ph=None,
+                    addon_ings=None, staple_ings=None) -> dict:
+    """The arithmetic, on explicit inputs — no session state, no widgets.
+
+    custom_ings=None means "ate the usual"; an empty list means the same. Pass
+    skip=True for a meal that did not happen.
+    """
+    zero = {k: 0.0 for k in _NUTR_KEYS}
+    sel_fruits  = list(fruits or [])
+    rids        = list(rids or [])
+    plan_ph     = list(plan_ph or [])
+    addon_ings  = list(addon_ings or [])
+    staple_ings = list(staple_ings or [])
+    bfst_custom_ings  = list(bfst_custom_ings or [])
+    lunch_custom_ings = list(lunch_custom_ings or [])
 
     # ── Breakfast ─────────────────────────────────────────────
-    bfst_custom_ings = []
     if bfst_skip:
         bfst_n, bfst_names = dict(zero), []
-    elif bfst_custom_txt:
-        bfst_custom_ings = _parse_placeholder(bfst_custom_txt)
+    elif bfst_custom_ings:
         bn, _ = calc_nutrition_with_breakdown(bfst_custom_ings)
         bfst_n     = {k: getattr(bn, k, 0.0) for k in _NUTR_KEYS}
         bfst_names = [i["name"] for i in bfst_custom_ings]
@@ -1324,11 +1357,9 @@ def compute_fullday_silent() -> dict:
         bfst_names = [i["name"] for i in _BFST_INGS]
 
     # ── Lunch ─────────────────────────────────────────────────
-    lunch_custom_ings = []
     if lunch_skip:
         lunch_n, lunch_names = dict(zero), []
-    elif lunch_custom_txt:
-        lunch_custom_ings = _parse_placeholder(lunch_custom_txt)
+    elif lunch_custom_ings:
         ln, _ = calc_nutrition_with_breakdown(lunch_custom_ings)
         lunch_n     = {k: getattr(ln, k, 0.0) for k in _NUTR_KEYS}
         lunch_names = [i["name"] for i in lunch_custom_ings]
@@ -1347,7 +1378,7 @@ def compute_fullday_silent() -> dict:
 
     # ── Dinner (÷2 per person, then ×serving_ratio) ──────────
     dinner_n, dinner_names = dict(zero), []
-    if rids or dinner_addons_txt or plan_ph:
+    if rids or addon_ings or plan_ph:
         dinner_ings = []
         if plan_ph:
             dinner_ings.extend(plan_ph)
@@ -1363,21 +1394,16 @@ def compute_fullday_silent() -> dict:
                     if not ing.get("is_condiment")
                 )
 
-        if dinner_addons_txt:
-            addons = _parse_placeholder(dinner_addons_txt)
-            dinner_ings.extend(addons)
-            dinner_names.extend([i["name"] for i in addons])
+        if addon_ings:
+            dinner_ings.extend(addon_ings)
+            dinner_names.extend([i["name"] for i in addon_ings])
 
         if dinner_ings:
             dn, _ = calc_nutrition_with_breakdown(dinner_ings)
             dinner_n = {k: getattr(dn, k, 0.0) / 2.0 for k in _NUTR_KEYS}
 
     # ── Dinner staple (per person, not ÷2) ───────────────────
-    staple_ings, staple_n, staple_names = [], dict(zero), []
-    if staple_choice == "🍚 白米饭":
-        staple_ings = [{"name": "米饭", "amount": float(staple_g), "unit": "g", "intake_ratio": 1.0}]
-    elif staple_choice == "✏️ 自定义" and staple_custom_txt:
-        staple_ings = _parse_placeholder(staple_custom_txt)
+    staple_n, staple_names = dict(zero), []
     if staple_ings:
         sn, _ = calc_nutrition_with_breakdown(staple_ings)
         staple_n     = {k: getattr(sn, k, 0.0) for k in _NUTR_KEYS}
@@ -1682,8 +1708,8 @@ def _log_meal_sources(log: dict) -> list:
     quietly showing the smaller number.
     """
     out = []
-    for label, col, default_ings in (("🌅 早餐", "breakfast", _BFST_INGS),
-                                     ("🕛 午餐", "lunch",     _LUNCH_INGS)):
+    for icon, meal, col, default_ings in (("🌅", "早餐", "breakfast", _BFST_INGS),
+                                          ("🕛", "午餐", "lunch",     _LUNCH_INGS)):
         raw = log.get(col)
         if not raw:
             # No stored blob at all — genuinely unknown. Falling back to "default"
@@ -1694,8 +1720,12 @@ def _log_meal_sources(log: dict) -> list:
         if mode == "skip":
             continue
         ings = blob.get("custom") if mode == "custom" else default_ings
-        if ings:
-            out.append((label, ings, 1.0))
+        if not ings:
+            continue
+        # Say which it was. A bare "早餐" tells you nothing you didn't already
+        # know — the whole point of opening a day is seeing what was eaten.
+        label = f"{icon} {'常规' if mode != 'custom' else '自定义'}{meal}"
+        out.append((label, ings, 1.0))
 
     extra = json.loads(log.get("dinner_placeholder") or "{}")
     fruits, fruit_g = extra.get("fruits") or [], float(extra.get("fruit_g_each") or 65)
@@ -1772,12 +1802,15 @@ def _day_detail(log: dict) -> None:
     stored = json.loads(log["total_nutrients_json"]) if log.get("total_nutrients_json") else {}
     sources = _log_meal_sources(log)
 
-    st.markdown(f"#### 📅 {log['date']}")
     if not sources:
         st.info("这条记录没有可还原的餐次明细（可能保存时早午餐都跳过且没有晚餐菜谱）。")
 
-    labels = [lbl for lbl, _, _ in sources]
-    st.caption("　·　".join(labels) if labels else "—")
+    # One line per meal with its actual contents, instead of a row of bare
+    # labels that just repeat the word "早餐".
+    for lbl, ings, div in sources:
+        names = "、".join(dict.fromkeys(i["name"] for i in ings if i.get("name")))
+        share = "　_(整锅，每人 ÷2)_" if div != 1.0 else ""
+        st.caption(f"**{lbl}**　{names}{share}")
 
     mc = st.columns(4)
     mc[0].metric("热量",   f"{stored.get('kcal', 0):.0f} kcal")
@@ -1973,17 +2006,148 @@ def _tab_history() -> None:
     _history_detail_picker(logs)
 
 
+def _ings_to_text(ings: list) -> str:
+    return "\n".join(
+        f"{i['name']} {float(i.get('amount') or 0):g} {i.get('unit', 'g')}"
+        for i in ings if i.get("name")
+    )
+
+
+_STAPLE_OPTS = ["🍚 白米饭", "🚫 不吃主食", "✏️ 自定义"]
+
+
+def _day_editor(default_date, logs_by_date: dict) -> None:
+    """Record or correct any day's meals.
+
+    Deliberately separate from 🌅 全日营养, which is the console for *today* and
+    whose inputs are the live fd_* widgets. Threading a date through that state
+    machine would mean editing 8月3日 could silently change today's staple; every
+    widget here is namespaced by date instead, and nothing touches fd_* or
+    plan_rids.
+    """
+    from db.daily_log import get_daily_log
+
+    d = st.date_input("日期", value=default_date, key="ed_date",
+                      help="选一个已有记录的日子来修改，或选一个空白日子补记")
+    iso = d.isoformat()
+    log = logs_by_date.get(iso) or get_daily_log(iso) or {}
+    K = f"ed_{iso}_"          # date in the key: switching days re-seeds every widget
+
+    st.caption(f"✏️ 正在编辑 **{iso}**" + ("（已有记录，保存将覆盖）" if log else "（还没有记录，将新建）"))
+    if iso == datetime.now().strftime("%Y-%m-%d"):
+        st.caption("　ℹ️ 这是今天。日常记录建议在「🌅 全日营养」页操作，那里能直接读今日规划的菜单。")
+
+    bf_blob = json.loads(log.get("breakfast") or "{}")
+    ln_blob = json.loads(log.get("lunch") or "{}")
+    extra   = json.loads(log.get("dinner_placeholder") or "{}")
+
+    def _meal(icon: str, name: str, blob: dict, defaults: list, slug: str) -> tuple:
+        mode = blob.get("mode", "default")
+        idx  = {"default": 0, "custom": 1, "skip": 2}.get(mode, 0)
+        pick = st.radio(f"{icon} {name}", ["常规", "自定义", "没吃"], index=idx,
+                        horizontal=True, key=f"{K}{slug}_mode")
+        if pick == "没吃":
+            return True, None
+        if pick == "常规":
+            st.caption("　" + "、".join(i["name"] for i in defaults))
+            return False, None
+        # Prefill with the usual list so "常规 + 多个鸡蛋" is one added line
+        # rather than retyping eleven ingredients.
+        seed = _ings_to_text(blob.get("custom") or defaults)
+        txt = st.text_area(f"{name}食材（每行 `食材名 数量 单位`）", value=seed,
+                           height=140, key=f"{K}{slug}_txt")
+        return False, _parse_placeholder(txt)
+
+    bf_skip, bf_custom = _meal("🌅", "早餐", bf_blob, _BFST_INGS, "bf")
+    ln_skip, ln_custom = _meal("🕛", "午餐", ln_blob, _LUNCH_INGS, "ln")
+
+    st.markdown("**🍎 水果**")
+    fc1, fc2 = st.columns([4, 1])
+    fruits = fc1.multiselect("水果", get_fruits_list(), default=extra.get("fruits") or [],
+                             key=f"{K}fruits", label_visibility="collapsed",
+                             accept_new_options=True)
+    remember_new_fruits(fruits)
+    fruit_g = fc2.number_input("每种(g)", 30, 200, int(extra.get("fruit_g_each") or 65),
+                               5, key=f"{K}fruit_g")
+
+    st.markdown("**🌙 晚餐**")
+    all_recipes = get_all_recipes()
+    by_id = {r["id"]: r for r in all_recipes}
+    stored_rids = [r for r in json.loads(log.get("dinner_recipe_ids") or "[]") if r in by_id]
+    rids = st.multiselect("菜谱", list(by_id.keys()), default=stored_rids,
+                          format_func=lambda i: by_id[i]["name"],
+                          key=f"{K}rids", label_visibility="collapsed",
+                          placeholder="选当天做的菜…")
+    addon_txt = st.text_area("其它/临时加菜（填**总克数**，会 ÷2 算每人份）", value="",
+                             height=70, key=f"{K}addon",
+                             placeholder="莴笋 150 g\n金针菇 100 g")
+
+    st.markdown("**🍚 主食（每人）**")
+    stored_staple = json.loads(log.get("dinner_staple") or "[]")
+    if not stored_staple:
+        s_idx, s_g = 1, 100
+    elif len(stored_staple) == 1 and stored_staple[0].get("name") == "米饭":
+        s_idx, s_g = 0, int(float(stored_staple[0].get("amount") or 100))
+    else:
+        s_idx, s_g = 2, 100
+    s_pick = st.radio("主食", _STAPLE_OPTS, index=s_idx, horizontal=True,
+                      key=f"{K}staple", label_visibility="collapsed")
+    if s_pick == "🍚 白米饭":
+        s_g = st.number_input("克数（熟米饭）", 50, 500, s_g, 10, key=f"{K}staple_g")
+        staple_ings = [{"name": "米饭", "amount": float(s_g), "unit": "g", "intake_ratio": 1.0}]
+    elif s_pick == "✏️ 自定义":
+        s_txt = st.text_area("主食食材（每人份）", value=_ings_to_text(stored_staple),
+                             height=70, key=f"{K}staple_txt")
+        staple_ings = _parse_placeholder(s_txt)
+    else:
+        staple_ings = []
+
+    if st.button(f"💾 保存到 {iso}", type="primary", use_container_width=True,
+                 key=f"{K}save"):
+        res = compute_fullday(
+            bfst_skip=bf_skip, bfst_custom_ings=bf_custom,
+            lunch_skip=ln_skip, lunch_custom_ings=ln_custom,
+            fruits=fruits, fruit_g=int(fruit_g), rids=rids,
+            addon_ings=_parse_placeholder(addon_txt) if addon_txt.strip() else [],
+            staple_ings=staple_ings,
+        )
+        save_daily_log(
+            iso, res["total"], rids, fruits, int(fruit_g),
+            bfst_skip=bf_skip, bfst_custom_ings=bf_custom or [],
+            lunch_skip=ln_skip, lunch_custom_ings=ln_custom or [],
+            staple_ings=staple_ings, ingredients_snapshot=res["snapshot"],
+        )
+        st.session_state["ed_msg"] = (
+            f"✅ {iso} 已保存：{res['total']['kcal']:.0f} kcal · "
+            f"蛋白质 {res['total']['protein']:.1f}g"
+        )
+        st.rerun()
+
+
 def _history_detail_picker(logs: list) -> None:
     """Pick any logged day and drill into it."""
     st.divider()
     st.subheader("📖 单日详情")
     by_date = {l["date"]: l for l in logs}
-    sel = st.selectbox(
-        "选择日期", list(by_date.keys()),
-        key="hist_detail_date", label_visibility="collapsed",
-    )
-    if sel:
-        _day_detail(by_date[sel])
+
+    if msg := st.session_state.pop("ed_msg", None):
+        st.success(msg)
+
+    sel = None
+    if by_date:
+        sel = st.selectbox(
+            "选择日期", list(by_date.keys()),
+            key="hist_detail_date", label_visibility="collapsed",
+        )
+        if sel:
+            _day_detail(by_date[sel])
+    else:
+        st.caption("还没有任何记录。")
+
+    with st.expander("✏️ 修改这天 / ➕ 补记某一天", expanded=not by_date):
+        default_date = (datetime.strptime(sel, "%Y-%m-%d").date() if sel
+                        else datetime.now().date())
+        _day_editor(default_date, by_date)
 
 
 # ── Entry point ───────────────────────────────────────────────

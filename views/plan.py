@@ -643,6 +643,11 @@ def _section_confirm(recipes_by_id: dict) -> None:
             from db.daily_log import save_daily_log
             fd = compute_fullday_silent()
             today = datetime.now().strftime("%Y-%m-%d")
+            # save_daily_log upserts by date. If today was already recorded —
+            # typically edited by hand in 📈 历史记录 → 单日详情 — say so instead of
+            # replacing it without a word.
+            from db.daily_log import get_daily_log
+            had_log = get_daily_log(today) is not None
             save_daily_log(
                 today, fd["total"], rids,
                 list(fd.get("fruits") or []),
@@ -654,7 +659,8 @@ def _section_confirm(recipes_by_id: dict) -> None:
                 staple_ings=fd.get("staple_ings") or [],
                 ingredients_snapshot=fd.get("snapshot") or [],
             )
-            nutrition_msg = " · 营养已记录"
+            nutrition_msg = (" · 营养记录已更新（覆盖今日原有记录）" if had_log
+                             else " · 营养已记录")
         except Exception as e:
             nutrition_msg = f" · ⚠️ 营养记录失败：{e}"
 
