@@ -89,23 +89,10 @@ def remove_by_recipe_ids(recipe_ids) -> int:
 # ─── Inventory availability check ─────────────────────────────
 
 def _build_avail_set() -> set:
-    """All ingredient names currently available — matches plan.py's logic
-    exactly so the "可做菜" count is consistent across pages.
-
-    Note: leafy_veg/protein tabs also contain a 常备免记量区 (boolean type
-    with in_stock flag), so we accept EITHER quantity > 0 OR in_stock.
-    """
-    inv = get_all_inventory()
-    avail: set = set()
-    for cat in ("leafy_veg", "protein"):
-        for item in inv.get(cat, []):
-            if (item.get("quantity") or 0) > 0 or item.get("in_stock"):
-                avail.add(item["name"])
-    for cat in ("dry_goods", "seasoning", "other"):
-        for item in inv.get(cat, []):
-            if item.get("in_stock"):
-                avail.add(item["name"])
-    return avail
+    """All ingredient names currently in stock — shared with 今日规划 and the
+    recommender so the 可做 badge here can't contradict either of them."""
+    from utils.inventory_state import available_names
+    return available_names(get_all_inventory())
 
 
 def _missing_ingredients(recipe_id: str, all_ings: dict, avail: set) -> list:

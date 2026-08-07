@@ -405,7 +405,53 @@ app 内的 AI 功能（AI 入库/AI 录入/库存解析/购物清单解析）用
 - 购物清单入库对 AI 返回的 `category` 做白名单校验：越界的值会写进 DB 但没有任何 tab 渲染它、可做菜过滤也看不到，等于买了东西却查无此物
 - 删掉 `db/daily_log.py` 的 `_BFST_DEFAULTS`/`_LUNCH_DEFAULTS` 和 `get/update_default_preset()`（105 行死代码）——正是第 28 条判定"维A 低估 10.7 倍"的那组原始估算值，无调用方但留着就是隐患。`meal_presets` 表本身未动
 
-### 35. 已知但暂不处理
+### 35. 第二轮冷审查：推荐器 / 食愿之书 / 购物清单（2026-08）
+
+第一轮按"数值正确性"挑模块读，这三个没覆盖到。补审 1285 行后的发现：
+
+**a. 添加超市会抛异常（唯一一个会弹红框的）**
+
+`views/shopping.py` 原来在 `text_input` 建好之后又给同一个 key 赋值来清空输入框：
+
+```python
+new_store = ac1.text_input("新店名", key="shop_new_store")   # 建 widget
+...
+st.session_state["shop_new_store"] = ""                      # ← 抛异常
+```
+
+Streamlit 的 `SessionState.__setitem__`（`session_state.py:533`）有守卫：本次 run 已实例化的 widget，key 不能再被赋值。**用 `streamlit.testing.v1.AppTest` 复现确认。** 而 `_save(data)` 在抛异常之前已经执行，所以表现是"红色报错但店其实建好了"，`st.rerun()` 则没跑。
+
+改用 version counter（`shop_new_store__v{ver}`，和 textarea 那套一致），bump 的是普通 key 不是 widget key。**注意 `__delitem__` 没有这个守卫**——`views/wishlist.py` 用 `st.session_state.pop()` 清输入框是安全的，别照着改成赋值。
+
+**b. `utils/inventory_state.py`：库存可用性判断收敛成一份**
+
+"这个食材现在有货吗"曾有三份实现，推荐器那份是错的：
+
+```python
+is_available = (q is None) or (q > 0)     # 旧的推荐器逻辑
+```
+
+叶菜/蛋白 tab 里的「🛒 常备免记量区」是 `item_type='boolean'`，`quantity` 恒为 NULL → **不管 `in_stock` 是 0 还是 1 一律判为有货**。实测把「猪肉末」标成 ⬜ 缺货：推荐器认为有货、今日规划的「仅显示可做的菜」认为没货，两个界面对同一道菜给出相反答案。
+
+现在 `is_available()` / `available_names()` / `HIGH_STOCK_PORTIONS` 都在 `utils/inventory_state.py`，推荐器、今日规划、食愿之书、库存页四处共用。**和第 33 条的 `recipe_ings_for_two()` 是同一个教训**：规则复制到多个调用点就会悄悄漂移。
+
+顺带：囤货阈值原本推荐器写 5、库存页写 4，现在统一为常量 4。`_score` 的 `high_stock` 加权补上 +3.0 封顶（原来无上限，5 个囤货食材 +5.0 会盖过易坏偏好）。
+
+**c. 炖菜不再算占锅**
+
+`_recipe_flags()` 用的是 `cook_time_min`（实操+等待），而 `_validate()` 和 `views/plan.py:_wok_violations()` 用 `active_time_min`。**同一条规则的两半互相矛盾**：一道「实操 3min + 炖 40min」的菜，选菜时判为标准占锅（挤掉真正炒菜的名额），复核时判为轻占锅。第 13 条记的"炖 40min 期间锅是空的"只改了一半。
+
+现在统一走 `wok_minutes()`（只看实操时间），三处共用。实测炖菜 + 炒菜同桌 → 无冲突。
+
+**d. 入库失败后重试会重复累加**
+
+`_commit_to_inventory()` 原本先把已有食材累加进库，再调 AI 分类新食材。AI 失败时 `return False`，但**前半段已经写进去了**；而失败时清单不清空，重试一次那些已有食材就被累加两次。现在分类先做，成功了才开始写。
+
+**e. 其它**：「🗑️ 清空全部」的二次确认标记原本永不过期（点一次看到警告 → 一周后再点一次直接清空，无警告），改为读取即清除、只对下一次 run 有效；采购入库的 `buys` 按名字建 dict，同店清单里写两遍的同名项只有最后一个的份数生效，改为累加；删除店铺原本在循环中途就 `_save`，会丢掉排在后面、尚未渲染的店的编辑，改为延后到全部读完；AI 解析建店按 casefold 归并（`hmart` / `Hmart` 不再变成两家店）。
+
+**f. 文档偏差 D5**：第 13 条说炒锅冲突判断"改用 `active_time_min`"，实际 `_recipe_flags` 从未改过——文档描述的是意图，代码只改了一半。已随本次修复对齐。
+
+### 36. 已知但暂不处理
 
 - **`utils/nutrition_lookup.py` 里 `calc_nutrition()` 的入参 key 也叫 `intake_ratio`**，和刚废弃的 DB 列同名。它指的是"这次计算对该食材打几折"，是计算层参数不是数据列。改名要动所有调用点，暂留——但读代码时注意区分。
 - **微量营养素没有覆盖率指标**：只有脂肪细分有 `fat_detailed`（能提示"只有 32% 的脂肪有细分数据"）。其余 13 项缺数据时按 0 静默累加，"真的吃少了"和"没数据"在 DRI 条上分不出来。按实际用量加权测算，维A/镁/锌/钾/钙/铁 当前覆盖 75–100%（早餐 100%），影响可控；**只有维D 是 27%**，但它已由补剂设置兜底。继续补数据（`scripts/ai_fill_micronutrients.py`）比做仪表盘划算。
@@ -454,7 +500,8 @@ app 内的 AI 功能（AI 入库/AI 录入/库存解析/购物清单解析）用
 | `db/daily_log.py` | 每日记录 CRUD，含 `dinner_staple`、`ingredients_snapshot`、`total_nutrients_json` |
 | `utils/cache.py` | `st.cache_data`/`st.cache_resource` 缓存层，包 `get_all_recipes`/`get_all_inventory`/`get_all_ingredients_grouped` 及写操作自动失效 |
 | `utils/nutrition_lookup.py` | 四级降级营养查询核心，`calc_nutrition_with_breakdown` 返回含 USDA 链接的明细 |
-| `utils/recommender.py` | 加权随机推荐器，3-pass 系统 + 结构化 slot 填充（1凉拌+2热菜+1汤） |
+| `utils/recommender.py` | 加权随机推荐器，2-pass + 结构化 slot 填充（1凉拌+2热菜+1汤）；占锅判定见 `wok_minutes()` |
+| `utils/inventory_state.py` | 库存可用性单一判据（`is_available`/`available_names`/`HIGH_STOCK_PORTIONS`），四处共用，见第 35 条 |
 | `utils/semantic_search.py` | ChromaDB 语义搜索，`paraphrase-multilingual-MiniLM-L12-v2`，持久化于 `./data/chroma` |
 | `utils/nutrition_advisor.py` | Gemini 营养顾问，3次/天限制存于 `user_settings` |
 | `utils/pdf_generator.py` | reportlab PDF 生成，PingFang 中文字体，餐厅菜单风格正面 |

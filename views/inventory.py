@@ -8,6 +8,9 @@ from utils.cache import (
     toggle_in_stock, set_quantity, add_item, delete_item,
     toggle_perishable, set_portion_weight,
 )
+# Shared with the recommender, which gives overstocked vegetables a mild boost —
+# the two used to disagree (4 here, 5 there) about what counts as 囤货.
+from utils.inventory_state import HIGH_STOCK_PORTIONS
 
 _INV_CATEGORIES = ["leafy_veg", "protein", "seasoning", "dry_goods", "other"]
 
@@ -38,7 +41,7 @@ _BAR_DOTS = 10
 
 def _dot(qty: float) -> str:
     if qty <= 0: return "🔘"
-    if qty >= 4: return "🟠"
+    if qty >= HIGH_STOCK_PORTIONS: return "🟠"
     return "🟢"
 
 
@@ -54,11 +57,11 @@ def _group_by_status(items: list) -> list:
     """Split items into status-based groups. Returns ordered list of (emoji, label, items)."""
     empty   = [i for i in items if (i.get("quantity") or 0) <= 0]
     perish  = [i for i in items if i.get("is_perishable") and (i.get("quantity") or 0) > 0]
-    stocked = [i for i in items if not i.get("is_perishable") and (i.get("quantity") or 0) >= 4]
-    normal  = [i for i in items if not i.get("is_perishable") and 0 < (i.get("quantity") or 0) < 4]
+    stocked = [i for i in items if not i.get("is_perishable") and (i.get("quantity") or 0) >= HIGH_STOCK_PORTIONS]
+    normal  = [i for i in items if not i.get("is_perishable") and 0 < (i.get("quantity") or 0) < HIGH_STOCK_PORTIONS]
     out: list = []
     if perish:  out.append(("🔴", "易坏优先消耗",        perish))
-    if stocked: out.append(("🟠", "囤货较多（≥4 份）",   stocked))
+    if stocked: out.append(("🟠", f"囤货较多（≥{HIGH_STOCK_PORTIONS:g} 份）",   stocked))
     if normal:  out.append(("🟢", "正常库存",            normal))
     if empty:   out.append(("🔘", "已用完",              empty))
     return out

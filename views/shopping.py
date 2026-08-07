@@ -156,6 +156,21 @@ def _commit_to_inventory(items: list) -> tuple:
             new_text_parts.append(f"{name} {portions}份")
             new_portion_map[name] = portions
 
+    # ── Classify new items FIRST, before writing anything ──
+    # The existing-item updates used to run before this call, so an AI failure
+    # returned "已累加 N 项，但 M 项分类失败" with those N already written — and
+    # since a failure leaves the shopping list on screen, retrying added them a
+    # second time (set_quantity accumulates). Nothing is written until the whole
+    # batch can be resolved.
+    parsed: list = []
+    if new_text_parts:
+        try:
+            from views.inventory import _ai_parse_inventory
+            parsed = _ai_parse_inventory(" ".join(new_text_parts))
+        except Exception as e:
+            return False, (f"{len(new_text_parts)} 项新条目分类失败：{e}"
+                           f"（未写入任何库存，可安全重试）")
+
     # ── Direct updates (existing items, no AI cost) ───────
     for it, portions in direct:
         if it.get("item_type") == "quantity":
@@ -164,15 +179,9 @@ def _commit_to_inventory(items: list) -> tuple:
         else:
             toggle_in_stock(it["id"], True)
 
-    # ── New items: classify via AI batch ──────────────────
+    # ── New items ─────────────────────────────────────────
     ai_added = 0
-    if new_text_parts:
-        try:
-            from views.inventory import _ai_parse_inventory
-            parsed = _ai_parse_inventory(" ".join(new_text_parts))
-        except Exception as e:
-            return False, (f"已累加 {len(direct)} 项，但 {len(new_text_parts)} 项新条目"
-                           f"分类失败：{e}")
+    if parsed:
         from views.inventory import _INV_CATEGORIES, default_portion_g
 
         for p in parsed:
@@ -216,6 +225,7 @@ def _store_columns(stores: list, data: dict) -> dict:
     """
     PER_ROW = 3
     new_data = dict(data)
+    to_delete: list = []
     for i in range(0, len(stores), PER_ROW):
         row = stores[i:i + PER_ROW]
         cols = st.columns(len(row))
@@ -225,9 +235,12 @@ def _store_columns(stores: list, data: dict) -> dict:
                 hc1.markdown(f"**🛒 {store}**")
                 if hc2.button("✕", key=f"del_store_{store}",
                               help=f"删除「{store}」清单"):
-                    new_data.pop(store, None)
-                    _save(new_data)
-                    st.rerun()
+                    # Deferred until every textarea below has been read. Saving
+                    # here dropped edits belonging to stores later in the loop:
+                    # clicking ✕ blurs the textarea you were typing in, so both
+                    # arrive in the same run, and the not-yet-rendered ones still
+                    # held their previous value.
+                    to_delete.append(store)
                 ver = st.session_state.get(f"shop_ver_{store}", 0)
                 current = data.get(store, "")
                 new = st.text_area(
@@ -240,6 +253,12 @@ def _store_columns(stores: list, data: dict) -> dict:
                 )
                 if new != current:
                     new_data[store] = new
+
+    if to_delete:
+        for store in to_delete:
+            new_data.pop(store, None)
+        _save(new_data)
+        st.rerun()
     return new_data
 
 
@@ -297,28 +316,42 @@ def show() -> None:
     data = _load()
     stores = list(data.keys())
 
+    # Read-and-clear: the 清空全部 confirmation is only valid for the very next
+    # run. Left set, it made a single click a week later wipe everything with no
+    # warning, because the flag from that earlier click was still sitting there.
+    clear_armed = st.session_state.pop("_confirm_clear_all", False)
+
     # ── Add new store ─────────────────────────────────────
     ac1, ac2, ac3 = st.columns([3, 1, 1])
+    # Version counter in the key, because assigning to a widget's key after the
+    # widget exists raises StreamlitAPIException — which is exactly what the old
+    # `st.session_state["shop_new_store"] = ""` did: the store was saved, then
+    # the run died with a red traceback before st.rerun() could fire.
+    ver = st.session_state.get("shop_new_store_v", 0)
     new_store = ac1.text_input(
         "新店名",
         placeholder="如 Hmart / Costco / 99 Ranch / Whole Foods",
-        key="shop_new_store",
+        key=f"shop_new_store__v{ver}",
         label_visibility="collapsed",
     )
-    if ac2.button("➕ 添加", use_container_width=True, disabled=not new_store.strip()):
+    # No `disabled=` — text only reaches the server on blur, so the first click
+    # would land on a still-disabled button and be swallowed (CLAUDE.md 第 23 条).
+    if ac2.button("➕ 添加", use_container_width=True):
         name = new_store.strip()
-        if name not in data:
+        existing_ci = {s.casefold(): s for s in data}
+        if not name:
+            st.warning("先填个店名")
+        elif name.casefold() in existing_ci:
+            st.warning(f"「{existing_ci[name.casefold()]}」已存在")
+        else:
             data[name] = ""
             _save(data)
-            st.session_state["shop_new_store"] = ""
+            st.session_state["shop_new_store_v"] = ver + 1   # plain key — safe
             st.rerun()
-        else:
-            st.warning(f"「{name}」已存在")
     if ac3.button("🗑️ 清空全部", use_container_width=True,
                   help="删除所有店和清单内容（不可撤销）"):
-        if st.session_state.get("_confirm_clear_all"):
+        if clear_armed:
             _save({})
-            st.session_state.pop("_confirm_clear_all", None)
             st.rerun()
         else:
             st.session_state["_confirm_clear_all"] = True
@@ -343,8 +376,13 @@ def show() -> None:
                 st.caption(items_str)
             bc1, bc2 = st.columns(2)
             if bc2.button("✅ 累加入清单", type="primary", use_container_width=True):
+                # Fold onto an existing store that differs only in case — the
+                # prompt asks for normalised names but doesn't guarantee them,
+                # and "hmart" arriving next to "Hmart" would split the list in two.
+                by_casefold = {s.casefold(): s for s in data}
                 for s in parsed:
-                    store = s["name"]
+                    store = by_casefold.get(s["name"].casefold(), s["name"])
+                    s["name"] = store          # so the version bump below matches
                     existing = data.get(store, "").rstrip()
                     new_lines = []
                     for i in s.get("items", []):
@@ -428,17 +466,21 @@ def show() -> None:
                 )
 
                 # Show items with per-item portion input
+                # Accumulate by name rather than overwrite: the same item written
+                # on two lines renders two inputs (keys carry the row index), and
+                # keying the dict by name alone silently dropped all but the last.
                 buys: dict = {}
                 for i, (name, note) in enumerate(items):
                     c1, c2 = st.columns([4, 1])
                     tag = f"  _{note}_" if note else ""
                     c1.markdown(f"**{name}**{tag}")
-                    buys[name] = c2.number_input(
+                    qty = c2.number_input(
                         "份数",
                         min_value=0, max_value=20, value=1, step=1,
                         key=f"shop_buy_{sel}_{i}",
                         label_visibility="collapsed",
                     )
+                    buys[name] = buys.get(name, 0) + qty
 
                 # Show inline error if commit failed
                 if err := st.session_state.get(f"shop_buy_err_{sel}"):

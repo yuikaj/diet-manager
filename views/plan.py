@@ -152,8 +152,12 @@ def _protein_target() -> tuple:
 # ── Constraint checks ─────────────────────────────────────────
 
 def _wok_violations(recipes: list) -> list:
-    std   = [r for r in recipes if r.get("uses_wok") and (r.get("active_time_min") or r.get("cook_time_min") or 99) > 5]
-    light = [r for r in recipes if r.get("uses_wok") and (r.get("active_time_min") or r.get("cook_time_min") or 99) <= 5]
+    # Same rule the recommender applies when picking, so the picker and this
+    # warning can't reach opposite conclusions about the same menu.
+    from utils.recommender import wok_minutes, _WOK_LIGHT_MAX_MIN
+
+    std   = [r for r in recipes if r.get("uses_wok") and wok_minutes(r) >  _WOK_LIGHT_MAX_MIN]
+    light = [r for r in recipes if r.get("uses_wok") and wok_minutes(r) <= _WOK_LIGHT_MAX_MIN]
     msgs  = []
     if len(std) > 1:
         names = "」「".join(r["name"] for r in std)
@@ -691,18 +695,8 @@ def _section_confirm(recipes_by_id: dict) -> None:
 
 
 def _build_avail_set(inv: dict) -> set:
-    available: set = set()
-    for item in inv.get("leafy_veg", []):
-        if (item.get("quantity") or 0) > 0 or item.get("in_stock"):
-            available.add(item["name"])
-    for item in inv.get("protein", []):
-        if (item.get("quantity") or 0) > 0 or item.get("in_stock"):
-            available.add(item["name"])
-    for cat in ("dry_goods", "seasoning", "other"):
-        for item in inv.get(cat, []):
-            if item.get("in_stock"):
-                available.add(item["name"])
-    return available
+    from utils.inventory_state import available_names
+    return available_names(inv)
 
 
 def _fetch_all_main_ings() -> dict[str, list[str]]:

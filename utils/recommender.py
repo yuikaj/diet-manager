@@ -15,6 +15,7 @@ from utils.cache import (
     get_all_recipes_cached as get_all_recipes,
     get_all_ingredients_grouped_cached as get_all_ingredients_grouped,
 )
+from utils.inventory_state import HIGH_STOCK_PORTIONS, is_available
 
 _DIFF_RANK     = {"简单": 0, "中等": 1, "繁琐": 2}
 _REQUIRED_CATS = ["纯蛋白", "半蛋白半素", "纯素"]
@@ -60,27 +61,29 @@ def _build_availability(inv: dict) -> tuple:
     perishables: set = set()
     high_stock:  set = set()
 
-    # 1. Process items with numeric/null quantity (Vegetables and Proteins)
+    # 1. Vegetables and proteins — both storage models live in these two tabs
     for cat in ("leafy_veg", "protein"):
         for item in inv.get(cat, []):
             name = item["name"]
             q = item.get("quantity")
-            
-            # Logic: Available if q is None (常备) or q > 0
-            is_available = (q is None) or (isinstance(q, (int, float)) and q > 0)
-            
-            if is_available:
-                qty_avail.add(name)
-                
-                # High stock/Perishable logic ONLY for leafy vegetables
-                if cat == "leafy_veg":
-                    if item.get("is_perishable"):
-                        perishables.add(name)
-                    # Threshold updated to 5 for the new 1-5 scale
-                    if q is not None and isinstance(q, (int, float)) and q >= 5:
-                        high_stock.add(name)
 
-    # 2. Process boolean-based items
+            # Shared with 今日规划 and 食愿之书. The old test here was
+            # `q is None or q > 0`, which made every 常备免记量 row (boolean type,
+            # NULL quantity) look permanently in stock — marking one ⬜ 缺货 hid
+            # its dishes from the picker while this kept recommending them.
+            if not is_available(item):
+                continue
+            qty_avail.add(name)
+
+            # High stock / perishable preference applies to vegetables only:
+            # a full freezer of protein shouldn't push the menu around.
+            if cat == "leafy_veg":
+                if item.get("is_perishable"):
+                    perishables.add(name)
+                if isinstance(q, (int, float)) and q >= HIGH_STOCK_PORTIONS:
+                    high_stock.add(name)
+
+    # 2. Boolean-only categories
     for cat in ("dry_goods", "seasoning", "other"):
         for item in inv.get(cat, []):
             if item.get("in_stock"):
@@ -88,13 +91,31 @@ def _build_availability(inv: dict) -> tuple:
 
     return qty_avail, bool_avail, perishables, high_stock
 
+def wok_minutes(r: dict) -> int:
+    """Minutes this dish actually ties up the wok.
+
+    Only hands-on time counts: a 40-minute braise leaves the wok free while it
+    sits, so scheduling it against a stir-fry is fine. This used to read
+    cook_time_min (active + idle) in the picker while _validate() and
+    views/plan.py used active_time_min — the two halves of the same rule
+    disagreed, so a 3-min-prep braise blocked a real stir-fry's slot in the
+    picker and was then judged harmless by the validator.
+    """
+    return r.get("active_time_min") or r.get("cook_time_min") or 99
+
+
+# Above this many hands-on minutes a wok dish is "standard occupancy"; at or
+# below it, it's a quick 轻占锅. At most one of each per meal.
+_WOK_LIGHT_MAX_MIN = 5
+
+
 def _recipe_flags(r: dict) -> tuple:
-    t       = r.get("cook_time_min") or 99
+    t       = wok_minutes(r)
     wok     = bool(r.get("uses_wok"))
     methods = r.get("cooking_method") or []
     return (
-        wok and t > 5,
-        wok and t <= 5,
+        wok and t > _WOK_LIGHT_MAX_MIN,
+        wok and t <= _WOK_LIGHT_MAX_MIN,
         "汤"   in methods,
         "凉拌" in methods,
     )
@@ -103,16 +124,21 @@ def _score(recipe: dict, main_ings: list, perishables: set, high_stock: set,
            wishlist_ids: Optional[set] = None) -> float:
     s = 1.0
     perishable_boost = 0.0
+    high_stock_boost = 0.0
     for name in main_ings:
         if name in perishables:
             # Reduced from +3.0 to +1.5 per perishable ing (was causing 100%
             # appearance of perishable-bearing dishes — 4× weight crushed alts)
             perishable_boost += 1.5
         if name in high_stock:
-            s += 1.0
+            high_stock_boost += 1.0
     # Cap total perishable stacking at +3.0 per recipe (was unlimited — a dish
     # with 3 perishables would hit 10×; now max is 2× boost ceiling)
     s += min(perishable_boost, 3.0)
+    # Same ceiling for overstock, which had none: a dish using five well-stocked
+    # vegetables scored +5.0 and outweighed the perishable preference it is
+    # supposed to sit below.
+    s += min(high_stock_boost, 3.0)
 
     if recipe.get("is_parallel"):
         s += 1.5
@@ -227,8 +253,8 @@ def _build_combo(
 
 def _validate(combo: list, required_cats: set) -> list:
     violations = []
-    std   = [r for r in combo if r.get("uses_wok") and (r.get("active_time_min") or r.get("cook_time_min") or 99) > 5]
-    light = [r for r in combo if r.get("uses_wok") and (r.get("active_time_min") or r.get("cook_time_min") or 99) <= 5]
+    std   = [r for r in combo if r.get("uses_wok") and wok_minutes(r) >  _WOK_LIGHT_MAX_MIN]
+    light = [r for r in combo if r.get("uses_wok") and wok_minutes(r) <= _WOK_LIGHT_MAX_MIN]
     if len(std) > 1: violations.append(f"炒锅冲突（{len(std)} 道标准占锅菜）")
     if len(light) > 1: violations.append(f"轻占锅过多（{len(light)} 道）")
 
