@@ -232,8 +232,15 @@ _recipe_ings = recipe_ings_for_two
 # ── Display components ────────────────────────────────────────
 
 def _bar(label: str, value: float, dri_1p: float, unit: str,
-         warn_over: bool = False) -> None:
-    """One nutrient progress bar — value and DRI both per-person."""
+         warn_over: bool = False, warn_at: float = 0.85) -> None:
+    """One nutrient progress bar — value and DRI both per-person.
+
+    warn_over marks a ceiling (钠, 饱和脂肪): lower is better, and the reference
+    is a limit rather than a goal. warn_at is where the ⚠️ starts. It defaults to
+    0.85 for whole-day figures — sitting at 73% of the saturated-fat ceiling is a
+    good day, not a near-miss. The dinner-only bars pass a stricter 0.65, where
+    the point is that one meal shouldn't consume two thirds of a daily limit.
+    """
     if dri_1p > 0:
         pct      = value / dri_1p
         pct_disp = pct * 100
@@ -246,14 +253,20 @@ def _bar(label: str, value: float, dri_1p: float, unit: str,
         warn_icon = ""
     elif pct > 1.0:
         warn_icon = " 🚨"
-    elif pct > 0.65:
+    elif pct > warn_at:
         warn_icon = " ⚠️"
     else:
-        warn_icon = ""
+        warn_icon = " ✅"   # comfortably under a ceiling is a good result, say so
+
+    # Ceilings and targets read identically otherwise, so 73% of the saturated-fat
+    # limit looked like "not enough" rather than "well within".
+    if warn_over:
+        label = f"{label} ↓"
 
     bc, vc = st.columns([5, 2])
     bc.progress(min(pct, 1.0), text=f"{label}：**{value:.1f} {unit}**{warn_icon}")
-    vc.caption(f"{pct_disp:.0f}% DRI/人")
+    # "% DRI" is wrong wording for a ceiling — it isn't an intake to reach.
+    vc.caption(f"{pct_disp:.0f}% 上限" if warn_over else f"{pct_disp:.0f}% DRI/人")
 
 
 # Editable nutrient fields: update_cached_nutrients() key → (DB column, label).
@@ -418,7 +431,9 @@ def _results(nutr: MealNutrition, breakdown: list) -> None:
 
     # Micro bars
     st.subheader("Micros（每人 / 晚餐）")
-    _bar("钠",     sodium_pp, dri["sodium"],    "mg", warn_over=True)
+    # Dinner alone, so the stricter cutoff applies: one meal reaching 65% of the
+    # whole day's sodium limit is worth flagging even though it isn't over it.
+    _bar("钠",     sodium_pp, dri["sodium"],    "mg", warn_over=True, warn_at=0.65)
     if sodium_pp > _SODIUM_LIMIT_PER_PERSON:
         st.error(f"🚨 钠严重超标：每人 {sodium_pp:.0f}mg，超过全天上限 {_SODIUM_LIMIT_PER_PERSON:.0f}mg！建议减少调料用量或调整菜谱调料摄入比例。")
     elif sodium_pp > _SODIUM_WARN_PER_PERSON:
@@ -1925,6 +1940,8 @@ def _tab_history() -> None:
         row = {"日期": log["date"]}
         dri_now = _dri()   # kcal from settings; carbs/fat scaled to it
         for key, label, default_dri, warn_over in _HISTORY_DRI:
+            # ↓ marks a ceiling, so a column can't be misread as a target missed
+            label = f"{label} ↓" if warn_over else label
             # A key absent from the stored snapshot means "not tracked back then",
             # not "zero". Showing 0% would paint 饱和脂肪 green (✅ under the
             # ceiling) for every log saved before that field existed.
@@ -1937,13 +1954,21 @@ def _tab_history() -> None:
             actual_dri = prot_dri_1p if key == "protein" else dri_now.get(key, default_dri)
             pct = val / actual_dri * 100 if actual_dri > 0 else 0.0
             
-            icon = ("✅" if pct < 65 else "🟡" if pct < 100 else "🔴") if warn_over \
+            # Ceilings (钠, 饱和脂肪) were scored with the same 65% cutoff the
+            # dinner-only sodium bar uses, so a whole day at 73% of the saturated
+            # fat limit came out 🟡 — indistinguishable from "you fell short",
+            # which is what 🟡 means in every other column.
+            icon = ("✅" if pct < 85 else "🟡" if pct < 100 else "🔴") if warn_over \
                 else ("✅" if pct >= 80 else "🟡" if pct >= 50 else "🔴")
             row[label] = f"{icon}{pct:.0f}%"
         dri_rows.append(row)
 
     st.dataframe(dri_rows, use_container_width=True, hide_index=True)
-    st.caption("✅ ≥80% DRI · 🟡 50–79% · 🔴 <50%　（钠反向：✅ <65% · 🟡 65–99% · 🔴 ≥100%）")
+    ceilings = "、".join(lbl for _, lbl, _, w in _HISTORY_DRI if w)
+    st.caption(
+        f"**带 ↓ 的是上限，越低越好**（{ceilings}）：✅ <85% · 🟡 85–99%（接近上限）· 🔴 ≥100%（超标）  \n"
+        "其余是目标摄入量：✅ ≥80% · 🟡 50–79% · 🔴 <50%"
+    )
 
     _history_detail_picker(logs)
 
