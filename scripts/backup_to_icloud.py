@@ -68,16 +68,34 @@ def _prune_old_backups() -> None:
 
 
 if __name__ == "__main__":
-    backup()
-    print(f"备份完成：{ICLOUD_BACKUP_PATH}")
+    # The two destinations must not be able to take each other down. This used to
+    # be one-way: a git failure was caught, but backup() ran bare — and since the
+    # git push is chained after it, any iCloud problem silently skipped the GitHub
+    # backup too. iCloud is the flakier of the two (the account-level
+    # ManagedAccountRestricted issue), i.e. exactly the one you don't want as a
+    # single point of failure for both.
+    ok_icloud = ok_git = False
 
-    # Also push to the private GitHub repo from here rather than via its own
-    # LaunchAgent: on Ventura a newly added agent is blocked by the background-item
-    # approval system (posix_spawn → "Operation not permitted", exit 78), while
-    # this already-approved job runs fine. Failures are swallowed so a git/network
-    # problem can never take down the local iCloud backup above.
+    try:
+        backup()
+        print(f"备份完成：{ICLOUD_BACKUP_PATH}")
+        ok_icloud = True
+    except Exception as e:
+        print(f"⚠️ iCloud 备份失败：{e}")
+
+    # Pushed from here rather than via its own LaunchAgent: on Ventura a newly
+    # added agent is blocked by the background-item approval system
+    # (posix_spawn → "Operation not permitted", exit 78), while this
+    # already-approved job runs fine.
     try:
         import backup_to_git
         backup_to_git.main()
+        ok_git = True
     except Exception as e:
-        print(f"⚠️ Git 备份失败（本地备份不受影响）：{e}")
+        print(f"⚠️ Git 备份失败：{e}")
+
+    # Non-zero exit only when BOTH failed — that is the state worth alarming on,
+    # and it makes `launchctl list | grep dietmanager` report it instead of the
+    # failure living only in a log file nobody opens.
+    if not (ok_icloud or ok_git):
+        sys.exit("🚨 两个备份目标都失败了，今天没有任何备份")
