@@ -310,10 +310,20 @@ def _ai_parse_inventory(raw: str) -> list:
 
 def _ai_inventory_expander() -> None:
     """⚡ AI 批量录入 — paste free-form text, Gemini parses, preview & commit."""
-    with st.expander("⚡ AI 批量录入（粘贴自然语言，自动解析入库）", expanded=False):
+    # Open the panel when there's a result or an error to show, so a failure
+    # isn't hidden behind a collapsed expander.
+    has_state = ("ai_inv_parsed" in st.session_state
+                 or "ai_inv_err" in st.session_state)
+    with st.expander("⚡ AI 批量录入（粘贴自然语言，自动解析入库）", expanded=has_state):
         msg = st.session_state.pop("ai_inv_msg", None)
         if msg:
             st.success(msg)
+
+        if err := st.session_state.get("ai_inv_err"):
+            st.error(err)
+            if st.button("✕ 关闭错误提示", key="ai_inv_err_dismiss"):
+                st.session_state.pop("ai_inv_err", None)
+                st.rerun()
 
         # Step 2: preview & commit
         if "ai_inv_parsed" in st.session_state:
@@ -427,15 +437,19 @@ def _ai_inventory_expander() -> None:
         )
         if st.button("🤖 AI 解析", type="primary", use_container_width=True,
                      disabled=not raw.strip()):
+            st.session_state.pop("ai_inv_err", None)
             with st.spinner("Gemini 正在解析…"):
                 try:
                     items = _ai_parse_inventory(raw.strip())
                     if items:
                         st.session_state["ai_inv_parsed"] = items
                     else:
-                        st.warning("未解析到任何条目，请检查输入")
+                        st.session_state["ai_inv_err"] = "未解析到任何条目，请检查输入"
                 except Exception as e:
-                    st.error(f"解析失败：{e}")
+                    # Stashed, not rendered: the st.rerun() below throws away
+                    # everything drawn in this run, so a plain st.error() here
+                    # would make a quota/JSON failure look like a dead button.
+                    st.session_state["ai_inv_err"] = f"解析失败：{e}"
             st.rerun()
 
 

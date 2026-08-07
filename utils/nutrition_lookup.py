@@ -50,6 +50,10 @@ _NUTRIENT_ID_MAP = {
     1293: "polyfat",    # polyunsaturated
 }
 
+# Single source of truth for "which nutrients exist", used by every tier so a
+# new nutrient can't be added to one path and forgotten in another.
+_NUTRIENT_KEYS = ("kcal",) + tuple(_NUTRIENT_ID_MAP.values())
+
 # Unit → grams conversion (approx)
 UNIT_TO_G: dict = {
     "g": 1.0,
@@ -252,20 +256,14 @@ def lookup_ingredient(
     if name in local:
         entry = local[name]
         p = entry["per_100g"]
+        # Every nutrient the JSON can carry, listed once. Spelling them out field
+        # by field is what let vitd/vita/magnesium/zinc silently go missing here
+        # for months: they were absent from both the object and the cache write,
+        # so a tier-2 hit wrote a lossy row into tier 1 — which then shadows this
+        # branch forever, making the loss permanent rather than a re-read away.
+        nutrients = {k: p.get(k) for k in _NUTRIENT_KEYS}
         n = NutritionPer100g(
-            kcal=p.get("kcal"),
-            protein=p.get("protein"),
-            fat=p.get("fat"),
-            carbs=p.get("carbs"),
-            sodium=p.get("sodium"),
-            fiber=p.get("fiber"),
-            vitc=p.get("vitc"),
-            iron=p.get("iron"),
-            calcium=p.get("calcium"),
-            potassium=p.get("potassium"),
-            satfat=p.get("satfat"),
-            monofat=p.get("monofat"),
-            polyfat=p.get("polyfat"),
+            **nutrients,
             source=entry.get("source") or "local",
             food_name=entry.get("en_name", name),
         )
@@ -273,13 +271,7 @@ def lookup_ingredient(
             ingredient_name=name,
             en_name=entry.get("en_name"),
             usda_food_id=f"local_{name}",
-            nutrients={
-                "kcal": n.kcal, "protein": n.protein, "fat": n.fat,
-                "carbs": n.carbs, "sodium": n.sodium, "fiber": n.fiber,
-                "vitc": n.vitc, "iron": n.iron, "calcium": n.calcium,
-                "potassium": n.potassium,
-                "satfat": n.satfat, "monofat": n.monofat, "polyfat": n.polyfat,
-            },
+            nutrients=nutrients,
             source=entry.get("source") or "local",
         )
         return n
@@ -290,24 +282,15 @@ def lookup_ingredient(
     result = _fetch_usda(en_query)
     if result:
         food_id, description, nutrients = result
+        # A search hit whose top result carries no energy figure is not a usable
+        # match — caching it would write an all-zero row that tier 1 then serves
+        # forever, so the ingredient counts as "found" (no missing-data warning)
+        # while contributing exactly nothing to every meal it appears in. Fall
+        # through to tier 4 instead, leaving it visibly unresolved and retryable.
+        if nutrients.get("kcal") is None:
+            return None
         n = NutritionPer100g(
-            kcal=nutrients.get("kcal"),
-            protein=nutrients.get("protein"),
-            fat=nutrients.get("fat"),
-            carbs=nutrients.get("carbs"),
-            sodium=nutrients.get("sodium"),
-            fiber=nutrients.get("fiber"),
-            vitc=nutrients.get("vitc"),
-            iron=nutrients.get("iron"),
-            calcium=nutrients.get("calcium"),
-            potassium=nutrients.get("potassium"),
-            vitd=nutrients.get("vitd"),
-            vita=nutrients.get("vita"),
-            magnesium=nutrients.get("magnesium"),
-            zinc=nutrients.get("zinc"),
-            satfat=nutrients.get("satfat"),
-            monofat=nutrients.get("monofat"),
-            polyfat=nutrients.get("polyfat"),
+            **{k: nutrients.get(k) for k in _NUTRIENT_KEYS},
             source="usda",
             food_name=description,
             usda_url=f"https://fdc.nal.usda.gov/food-details/{food_id}/nutrients",

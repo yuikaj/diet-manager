@@ -10,7 +10,6 @@ from pathlib import Path
 import streamlit as st
 
 from db.init_db import get_connection
-from db.recipes import get_ingredients
 from utils.cache import get_all_recipes_cached as get_all_recipes
 from utils.nutrition_lookup import calc_nutrition_with_breakdown
 
@@ -109,20 +108,13 @@ def _sort_for_menu(recipes: list) -> list:
 
 
 def _build_ings(recipe_ids: list, ph: list, recipes_by_id: dict) -> list:
+    """Same conversion as 今日规划 / 全日营养 — the family view must not show a
+    different number from the one recorded for the same meal."""
+    from views.nutrition import recipe_ings_for_two
+
     result = []
     for rid in recipe_ids:
-        recipe    = recipes_by_id.get(rid, {})
-        cond_r    = float(recipe.get("condiment_ratio") or 1.0)
-        serving_r = float(recipe.get("serving_ratio")   or 1.0)
-        for ing in get_ingredients(rid):
-            base_ratio = float(ing.get("intake_ratio") if ing.get("intake_ratio") is not None else 1.0)
-            ratio = (base_ratio * cond_r) if ing.get("is_condiment") else base_ratio
-            result.append({
-                "name":         ing["name"],
-                "amount":       float(ing.get("amount") or 0) * serving_r,
-                "unit":         ing.get("unit", "g"),
-                "intake_ratio": ratio,
-            })
+        result.extend(recipe_ings_for_two(rid, recipes_by_id.get(rid)))
     result.extend(ph)
     return result
 

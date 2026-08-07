@@ -130,7 +130,7 @@ PRD 描述的是三级降级；实际实现了**四级降级**（SQLite cache �
 
 ### 12. 个人摄入份量（serving_ratio）
 每道菜新增 `serving_ratio` 字段（DB migration step 12，默认 1.0）：
-- 菜谱编辑页新增滑块（0-100%，步进 5%，新建默认 50%）
+- 菜谱编辑页新增滑块（0-100%，步进 5%，**新建默认 100%**）
 - 参与晚餐营养计算：`食材克重 × serving_ratio ÷ 2 = 每人实际摄入`
 - 菜谱详情页显示「个人份量」指标
 - 适用场景：大份量汤/砂锅只喝一小碗、共享菜只取小份等
@@ -337,6 +337,52 @@ iCloud 那条链路查下来是账号层问题（CloudKit `Code=20 ManagedAccoun
 `gemini-2.0-flash` 的免费额度已被 Google 收回，API 返回 `limit: 0`（不是超配额，是彻底不可用）。实测可用：`gemini-flash-lite-latest` ✅、`gemini-2.5-flash` ✅、`gemini-flash-latest` ✅；`gemini-2.5-flash-lite` 返回 404。
 
 app 内的 AI 功能（AI 入库/AI 录入/库存解析/购物清单解析）用的都是 `gemini-flash-lite-latest`，**不受影响**。但 CLAUDE.md 旧版里「gemini-2.0-flash 1500 RPD」的说法已过时，新写脚本别再用它。
+
+### 33. 冷审查修复：克重口径统一 + 三处静默算错（2026-08）
+
+一次完整的 cold pass 审查后修掉的一批**不抛异常、只算错数**的问题。
+
+**a. 「调料摄入比例」的三代实现，只留最后一代**
+
+同一个概念在库里存在过三份，前两代被取代但从未清理：
+
+| 代 | 载体 | 处置 |
+|---|---|---|
+| 一代 | `user_settings.condiment_intake_ratio`（全局 25% 滑块，PRD 原设计） | migration 16 删除该行，`_user_settings_seeds()` 不再种 |
+| 二代 | `ingredients.intake_ratio`（per-食材，migration step 1） | 列保留（删列要重建表），migration 16 全量归一为 1.0，**代码全线不再读** |
+| 三代 | `recipes.condiment_ratio`（per-菜，migration step 4） | 当前唯一在用 |
+
+二代复活的经过值得记住：`views/recipes.py` 的 AI 入库 prompt 是照着 `ingredients` 表列清单写输出格式的，看到这个废弃列就把它抄进了 JSON schema，还编了段说明（"其余参考 condiment_ratio"——等于自己承认重复）。Gemini 于是把同一个 0.9 同时写进 `recipes.condiment_ratio` 和 8 个调料的 `intake_ratio`，而 `plan.py`/`tonight.py` 里早就存在的 `base_ratio * cond_r` 乘法立刻开始双重打折（0.81 而非 0.9），`nutrition.py` 却只乘一次 → **规划页看到的钠和存进 `daily_logs` 的钠差 10%**。
+
+**教训：废弃一个字段时，删列/删乘法/记文档三件事要一起做。留着的列迟早会被下一个照表结构写代码的人（或 prompt）捡回来。**
+
+**b. 唯一的克重口径入口 `recipe_ings_for_two()`（`views/nutrition.py`）**
+
+原来 `plan.py` / `tonight.py` / `nutrition.py` 的两个 tab 各有一份"菜谱 → 食材列表"的转换，四份实现三种算法。现在统一为一个函数，其余三处 import 它：
+
+```
+每人摄入 = amount × serving_ratio × (condiment_ratio if 调料 else 1) ÷ 2
+```
+
+- `serving_ratio` — per 菜：这一顿吃掉锅里的多少（4 servings 的红烧肉吃两顿 → 0.5）
+- `condiment_ratio` — per 菜：调料真正吃进去多少（红烧肉的酱油不会都喝了）
+- `÷ 2` — 两个人分
+
+顺带修掉「🍽️ 菜谱营养计算」tab **完全没乘 `serving_ratio`** 的问题（`serving_ratio=0.35` 的菜在那里比全日营养页高 2.9 倍）。**以后再有新页面要算营养，直接用这个函数，别自己拼食材列表。**
+
+**c. 营养查询的 NULL 语义**
+
+- **tier-2 曾静默丢弃 4 种微量营养素**：`lookup_ingredient()` 的 local json 分支逐字段手写，漏了 `vitd/vita/magnesium/zinc`，并把这份残缺数据写进 tier-1 缓存。因为缓存 shadow local json，丢失是**永久**的（「🔄 同步 local_nutrition.json」也救不回来，它跳过已缓存的名字）。现在两处共用 `_NUTRIENT_KEYS` 常量，新增营养素不可能只加一半。存量 70 条坏行用 `scripts/repair_local_cache_micros.py` 修复（209 个字段，只填 NULL 不覆盖已有值）。
+- **USDA 命中但无热量数据不再写缓存**：原来只要搜索有结果就照单全收，写出一条全 0 的行；此后 tier-1 命中，食材"查到了"（不进 missing 警告）但对每道菜贡献 0。现在 `kcal is None` 直接降级到 tier 4，保持可见、可重试。
+
+**d. 两处 AI 报错被 `st.rerun()` 吞掉**：`views/inventory.py`、`views/recipes.py` 的 AI 解析失败原本 `st.error()` 后紧跟无条件 `st.rerun()`，用户看到的是"按钮点了没反应"。改为存 session_state 下一轮渲染（与 `views/nutrition.py` 的 `ai_nutr_error` 同款），并让 expander 自动展开。
+
+**e. 保存今日记录混用旧快照 + 实时控件**：`compute_fullday_silent()` 现在把 `fruits`/`fruit_g` 一并返回，保存时用返回值而非重读 widget——原来"算完营养后改水果再保存"会让存进去的水果清单和热量对不上。
+
+### 34. 已知但暂不处理
+
+- **`utils/nutrition_lookup.py` 里 `calc_nutrition()` 的入参 key 也叫 `intake_ratio`**，和刚废弃的 DB 列同名。它指的是"这次计算对该食材打几折"，是计算层参数不是数据列。改名要动所有调用点，暂留——但读代码时注意区分。
+- **微量营养素没有覆盖率指标**：只有脂肪细分有 `fat_detailed`（能提示"只有 32% 的脂肪有细分数据"）。其余 13 项缺数据时按 0 静默累加，"真的吃少了"和"没数据"在 DRI 条上分不出来。按实际用量加权测算，维A/镁/锌/钾/钙/铁 当前覆盖 75–100%（早餐 100%），影响可控；**只有维D 是 27%**，但它已由补剂设置兜底。继续补数据（`scripts/ai_fill_micronutrients.py`）比做仪表盘划算。
 
 ---
 

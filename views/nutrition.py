@@ -190,6 +190,45 @@ def _parse_placeholder(text: str) -> list:
     return result
 
 
+def recipe_ings_for_two(recipe_id: str, recipe: Optional[dict] = None) -> list:
+    """A recipe's ingredients as *cooked-for-two* amounts, ready for calc_nutrition.
+
+    The single source of truth for the gram pipeline. Callers still divide the
+    resulting nutrition by 2 to get a per-person figure:
+
+        每人摄入 = amount × serving_ratio × (condiment_ratio if 调料 else 1) ÷ 2
+
+    Three knobs, each with a distinct job:
+      serving_ratio   — per recipe: how much of the pot this meal actually eats
+                        (a 4-serving 红烧肉 stretched over two dinners → 0.5)
+      condiment_ratio — per recipe: how much of the seasoning is really ingested
+                        (you don't drink all the braising soy sauce)
+      ÷ 2             — two people share it
+
+    Deliberately ignores `ingredients.intake_ratio`. That column predates
+    `recipes.condiment_ratio` (migration step 1 vs step 4) and expresses the same
+    idea per-ingredient; multiplying both discounts the seasoning twice. It is
+    kept at 1.0 everywhere and no longer read.
+    """
+    if recipe is None:
+        recipe = get_recipe(recipe_id) or {}
+    cond_r    = float(recipe.get("condiment_ratio") or 1.0)
+    serving_r = float(recipe.get("serving_ratio")   or 1.0)
+    return [
+        {
+            "name":         ing["name"],
+            "amount":       float(ing.get("amount") or 0) * serving_r,
+            "unit":         ing.get("unit", "g"),
+            "intake_ratio": cond_r if ing.get("is_condiment") else 1.0,
+        }
+        for ing in get_ingredients(recipe_id)
+    ]
+
+
+# Short alias used inside this module.
+_recipe_ings = recipe_ings_for_two
+
+
 # ── Display components ────────────────────────────────────────
 
 def _bar(label: str, value: float, dri_1p: float, unit: str,
@@ -432,17 +471,8 @@ def _tab_calc() -> None:
             return
 
         for name in sel:
-            rid    = opts[name]
-            recipe = get_recipe(rid)
-            cond_r = float((recipe or {}).get("condiment_ratio") or 1.0)
-            for ing in get_ingredients(rid):
-                ratio = cond_r if ing.get("is_condiment") else 1.0
-                ingredients.append({
-                    "name":         ing["name"],
-                    "amount":       float(ing.get("amount") or 0),
-                    "unit":         ing.get("unit", "g"),
-                    "intake_ratio": ratio,
-                })
+            rid = opts[name]
+            ingredients.extend(_recipe_ings(rid))
         calc_label = " + ".join(sel)
 
     elif mode == "📅 从今日规划":
@@ -455,16 +485,8 @@ def _tab_calc() -> None:
             recipe = get_recipe(rid)
             if recipe is None:
                 continue
-            cond_r = float(recipe.get("condiment_ratio") or 1.0)
             names.append(recipe["name"])
-            for ing in get_ingredients(rid):
-                ratio = cond_r if ing.get("is_condiment") else 1.0
-                ingredients.append({
-                    "name":         ing["name"],
-                    "amount":       float(ing.get("amount") or 0),
-                    "unit":         ing.get("unit", "g"),
-                    "intake_ratio": ratio,
-                })
+            ingredients.extend(_recipe_ings(rid, recipe))
         if not ingredients:
             st.warning("今日规划中的菜谱未找到食材数据。")
             return
@@ -1289,17 +1311,11 @@ def compute_fullday_silent() -> dict:
                 r = get_recipe(rid)
                 if r is None:
                     continue
-                cond_r    = float(r.get("condiment_ratio") or 1.0)
-                serving_r = float(r.get("serving_ratio")   or 1.0)
-                for ing in get_ingredients(rid):
-                    ratio = cond_r if ing.get("is_condiment") else 1.0
-                    dinner_ings.append({
-                        "name": ing["name"],
-                        "amount": float(ing.get("amount") or 0) * serving_r,
-                        "unit": ing.get("unit", "g"), "intake_ratio": ratio,
-                    })
-                    if not ing.get("is_condiment"):
-                        dinner_names.append(ing["name"])
+                dinner_ings.extend(_recipe_ings(rid, r))
+                dinner_names.extend(
+                    ing["name"] for ing in get_ingredients(rid)
+                    if not ing.get("is_condiment")
+                )
 
         if dinner_addons_txt:
             addons = _parse_placeholder(dinner_addons_txt)
@@ -1335,6 +1351,11 @@ def compute_fullday_silent() -> dict:
         "bfst_skip": bfst_skip, "lunch_skip": lunch_skip,
         "bfst_custom_ings": bfst_custom_ings, "lunch_custom_ings": lunch_custom_ings,
         "staple_ings": staple_ings, "snapshot": snapshot, "rids": rids,
+        # Carried in the result so save_daily_log() records the fruit that this
+        # total was actually computed from. Reading the widgets again at save
+        # time let a fruit changed after 计算 land in the log while its calories
+        # did not — the stored total and the stored fruit list disagreed.
+        "fruits": sel_fruits, "fruit_g": fruit_g,
     }
 
 
@@ -1485,8 +1506,8 @@ def _tab_fullday() -> None:
         save_daily_log(
             today, total,
             res["rids"],
-            list(st.session_state.get("fd_fruits", [])),
-            int(st.session_state.get("fd_fruit_g", 65)),
+            list(res.get("fruits") or []),
+            int(res.get("fruit_g") or 65),
             bfst_skip=res["bfst_skip"],
             bfst_custom_ings=res.get("bfst_custom_ings") or [],
             lunch_skip=res["lunch_skip"],

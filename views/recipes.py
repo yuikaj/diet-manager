@@ -172,7 +172,6 @@ def _prefill_form(rid: str) -> None:
         unit_val = ing.get("unit", "g")
         if unit_val not in UNITS:
             unit_val = "g"
-        ratio = float(ing.get("intake_ratio", 1.0))
         st.session_state[f"ing_{sid}_name"]  = ing["name"]
         st.session_state[f"ing_{sid}_amt"]   = float(ing.get("amount") or 0)
         st.session_state[f"ing_{sid}_unit"]  = unit_val
@@ -279,8 +278,7 @@ _AI_PARSE_PROMPT = """你是一位拥有 20 年经验的资深大厨和数据专
       "name": "食材名",
       "amount": 数值（amount_g换算后的数字）,
       "unit": "g",
-      "is_condiment": true/false（液体调料/酱料/香料/芡粉=true；主料=false）,
-      "intake_ratio": 0.0-1.0（主料=1.0，汤汁调料=0.3，其余参考condiment_ratio）
+      "is_condiment": true/false（液体调料/酱料/香料/芡粉=true；主料=false）
     }}
   ]
 }}
@@ -346,6 +344,11 @@ def _view_ai_onboard() -> None:
 
     # ── Step 1: text input ────────────────────────────────────
     if "ai_ob_recipe" not in st.session_state:
+        if err := st.session_state.get("ai_ob_err"):
+            st.error(err)
+            if st.button("✕ 关闭错误提示", key="ai_ob_err_dismiss"):
+                st.session_state.pop("ai_ob_err", None)
+                st.rerun()
         st.subheader("① 粘贴菜谱文字")
         raw = st.text_area(
             "菜谱原文",
@@ -360,6 +363,7 @@ def _view_ai_onboard() -> None:
             label_visibility="collapsed",
         )
         if st.button("🤖 AI 解析", type="primary", use_container_width=True, disabled=not raw.strip()):
+            st.session_state.pop("ai_ob_err", None)
             with st.spinner("Gemini 正在解析菜谱…"):
                 try:
                     recipe_data, ings = _ai_parse_recipe(raw.strip())
@@ -367,7 +371,10 @@ def _view_ai_onboard() -> None:
                     st.session_state["ai_ob_ings"]   = ings
                     st.session_state["ai_ob_raw"]    = raw.strip()
                 except Exception as e:
-                    st.error(f"解析失败：{e}")
+                    # Stashed rather than rendered — the st.rerun() below discards
+                    # this run's output, so an inline st.error() is never seen and
+                    # a quota/JSON failure looks like the button did nothing.
+                    st.session_state["ai_ob_err"] = f"解析失败：{e}"
             st.rerun()
         return
 
@@ -889,7 +896,9 @@ def _view_form() -> None:
                 "amount":       float(st.session_state.get(f"ing_{sid}_amt") or 0),
                 "unit":         st.session_state.get(f"ing_{sid}_unit", "g"),
                 "is_condiment": is_cond,
-                "intake_ratio": 1.0,  # condiment ratio applied globally via user_settings
+                # Always 1.0 — the per-ingredient knob is retired. 调料摄入比例
+                # lives on the recipe as condiment_ratio (this page's 滑块).
+                "intake_ratio": 1.0,
             })
 
         tags_raw = st.session_state.get("rf_tags", "")

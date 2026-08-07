@@ -16,7 +16,10 @@ from utils.cache import (
 from utils.nutrition_lookup import calc_nutrition_with_breakdown, to_grams
 from utils.recommender import recommend
 from utils.pdf_generator import generate_daily_menu_pdf, open_pdf
-from views.nutrition import get_pdf_nutrition_dict, get_fruits_list, remember_new_fruits
+from views.nutrition import (
+    get_pdf_nutrition_dict, get_fruits_list, remember_new_fruits,
+    recipe_ings_for_two,
+)
 
 # ── Session state keys ────────────────────────────────────────
 _RIDS    = "plan_rids"     # list[str]  — selected recipe IDs (ordered)
@@ -195,22 +198,12 @@ def _boredom_violations(recipe_ids: list) -> list:
 # ── Nutrition preview (Remains based on exact Grams) ──────────
 
 def _build_ings(recipe_ids: list, ph: list, recipes_by_id: dict) -> list:
+    """Cooked-for-two ingredient list for the preview — same conversion the
+    全日营养 tab uses, so the number shown here and the number written to
+    daily_logs can't drift apart."""
     result = []
     for rid in recipe_ids:
-        recipe    = recipes_by_id.get(rid, {})
-        cond_r    = float(recipe.get("condiment_ratio") or 1.0)
-        serving_r = float(recipe.get("serving_ratio")   or 1.0)
-        for ing in get_ingredients(rid):
-            # 【修复】同步加入 intake_ratio 判断逻辑
-            base_ratio = float(ing.get("intake_ratio") if ing.get("intake_ratio") is not None else 1.0)
-            ratio = (base_ratio * cond_r) if ing.get("is_condiment") else base_ratio
-            
-            result.append({
-                "name":         ing["name"],
-                "amount":       float(ing.get("amount") or 0) * serving_r,
-                "unit":         ing.get("unit", "g"),
-                "intake_ratio": ratio,
-            })
+        result.extend(recipe_ings_for_two(rid, recipes_by_id.get(rid)))
     result.extend(ph)
     return result
 
@@ -648,8 +641,8 @@ def _section_confirm(recipes_by_id: dict) -> None:
             today = datetime.now().strftime("%Y-%m-%d")
             save_daily_log(
                 today, fd["total"], rids,
-                list(st.session_state.get("fd_fruits", [])),
-                int(st.session_state.get("fd_fruit_g", 65)),
+                list(fd.get("fruits") or []),
+                int(fd.get("fruit_g") or 65),
                 bfst_skip=fd.get("bfst_skip", False),
                 bfst_custom_ings=fd.get("bfst_custom_ings") or [],
                 lunch_skip=fd.get("lunch_skip", False),

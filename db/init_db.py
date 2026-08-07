@@ -251,7 +251,11 @@ def _user_settings_seeds():
         ("target_kcal_per_day", "1700"),   # per person, per day
         ("language", "zh"),
         ("max_wok_dishes", "1"),
-        ("condiment_intake_ratio", "0.25"),  # fraction of condiment mass actually consumed
+        # NOTE: `condiment_intake_ratio` used to be seeded here — the original
+        # global 25% slider. It was superseded by per-recipe recipes.condiment_ratio
+        # and nothing has read it for a long time; migration 16 drops the stale row.
+        # Don't re-add it: a leftover setting is exactly how the obsolete
+        # ingredients.intake_ratio got resurrected by a later AI prompt.
     ]
 
 
@@ -405,6 +409,28 @@ def migrate_database() -> None:
         if "steps" not in cols:
             conn.execute("ALTER TABLE recipes ADD COLUMN steps TEXT NOT NULL DEFAULT '[]'")
             print("  migration: added recipes.steps")
+
+        # 16. Retire the two older generations of "how much seasoning is actually
+        #     eaten". The concept has been re-implemented three times:
+        #       gen 1  user_settings.condiment_intake_ratio  (global 25% slider)
+        #       gen 2  ingredients.intake_ratio              (per ingredient, step 1)
+        #       gen 3  recipes.condiment_ratio               (per recipe, step 4) ← current
+        #     Gen 1 and 2 were superseded but never cleaned up, and a later AI
+        #     import prompt copied the leftover column back into its JSON schema —
+        #     Gemini then wrote the same 0.9 into both the recipe and each of its
+        #     condiments, and the pages that multiplied both discounted twice.
+        #     The column stays (dropping it means rebuilding the table) but is
+        #     pinned to 1.0 and no longer read by any code path.
+        n_ir = conn.execute(
+            "UPDATE ingredients SET intake_ratio = 1.0 WHERE intake_ratio <> 1.0"
+        ).rowcount
+        if n_ir:
+            print(f"  migration: normalised {n_ir} ingredients.intake_ratio → 1.0")
+        n_cir = conn.execute(
+            "DELETE FROM user_settings WHERE key = 'condiment_intake_ratio'"
+        ).rowcount
+        if n_cir:
+            print("  migration: dropped stale user_settings.condiment_intake_ratio")
 
         conn.commit()
     finally:
