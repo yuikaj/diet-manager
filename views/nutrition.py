@@ -1265,7 +1265,7 @@ def _meal_card(title: str, ings: list, detail_lines: list) -> None:
 _FD_KEYS = (
     "fd_bfst_skip", "fd_bfst_custom_txt", "fd_lunch_skip", "fd_lunch_custom_txt",
     "fd_staple_choice", "fd_staple_g", "fd_staple_custom_txt",
-    "fd_fruits", "fd_fruit_g", "fd_dinner_addons_txt",
+    "fd_fruits", "fd_fruit_g", "fd_dinner_addons_txt", "fd_dinner_solo_txt",
 )
 
 
@@ -1302,6 +1302,7 @@ def compute_fullday_silent() -> dict:
     staple_g          = int(st.session_state.get("fd_staple_g", 100))
     staple_custom_txt = st.session_state.get("fd_staple_custom_txt", "").strip()
     dinner_addons_txt = st.session_state.get("fd_dinner_addons_txt", "").strip()
+    dinner_solo_txt   = st.session_state.get("fd_dinner_solo_txt", "").strip()
 
     staple_ings = []
     if staple_choice == "🍚 白米饭":
@@ -1322,6 +1323,7 @@ def compute_fullday_silent() -> dict:
         # joins dinner_ings and is halved with them.
         plan_ph=list(st.session_state.get("plan_ph", [])),
         addon_ings=_parse_placeholder(dinner_addons_txt) if dinner_addons_txt else [],
+        solo_ings=_parse_placeholder(dinner_solo_txt) if dinner_solo_txt else [],
         staple_ings=staple_ings,
     )
 
@@ -1329,7 +1331,7 @@ def compute_fullday_silent() -> dict:
 def compute_fullday(*, bfst_skip=False, bfst_custom_ings=None,
                     lunch_skip=False, lunch_custom_ings=None,
                     fruits=None, fruit_g=65, rids=None, plan_ph=None,
-                    addon_ings=None, staple_ings=None) -> dict:
+                    addon_ings=None, solo_ings=None, staple_ings=None) -> dict:
     """The arithmetic, on explicit inputs — no session state, no widgets.
 
     custom_ings=None means "ate the usual"; an empty list means the same. Pass
@@ -1340,6 +1342,10 @@ def compute_fullday(*, bfst_skip=False, bfst_custom_ings=None,
     rids        = list(rids or [])
     plan_ph     = list(plan_ph or [])
     addon_ings  = list(addon_ings or [])
+    # Dinner eaten alone or out: already a single portion, so it must NOT be
+    # halved the way a shared pot is. Putting a restaurant meal in addon_ings
+    # would silently record half of it.
+    solo_ings   = list(solo_ings or [])
     staple_ings = list(staple_ings or [])
     bfst_custom_ings  = list(bfst_custom_ings or [])
     lunch_custom_ings = list(lunch_custom_ings or [])
@@ -1403,26 +1409,34 @@ def compute_fullday(*, bfst_skip=False, bfst_custom_ings=None,
             dinner_n = {k: getattr(dn, k, 0.0) / 2.0 for k in _NUTR_KEYS}
 
     # ── Dinner staple (per person, not ÷2) ───────────────────
+    solo_n, solo_names = dict(zero), []
+    if solo_ings:
+        so, _ = calc_nutrition_with_breakdown(solo_ings)
+        solo_n     = {k: getattr(so, k, 0.0) for k in _NUTR_KEYS}
+        solo_names = [i["name"] for i in solo_ings]
+
     staple_n, staple_names = dict(zero), []
     if staple_ings:
         sn, _ = calc_nutrition_with_breakdown(staple_ings)
         staple_n     = {k: getattr(sn, k, 0.0) for k in _NUTR_KEYS}
         staple_names = [i["name"] for i in staple_ings]
 
-    total    = _add_nutr(bfst_n, fruit_n, lunch_n, dinner_n, staple_n)
+    total    = _add_nutr(bfst_n, fruit_n, lunch_n, dinner_n, solo_n, staple_n)
     # Daily supplements land on top of everything eaten (see get_supplements).
     supp = get_supplements()
     for k, v in supp.items():
         if k in total:
             total[k] = total[k] + float(v or 0)
-    snapshot = list(dict.fromkeys(bfst_names + sel_fruits + lunch_names + dinner_names + staple_names))
+    snapshot = list(dict.fromkeys(bfst_names + sel_fruits + lunch_names
+                                  + dinner_names + solo_names + staple_names))
 
     return {
         "total": total, "supplements": supp, "bfst": bfst_n, "fruit": fruit_n,
-        "lunch": lunch_n, "dinner": dinner_n, "staple": staple_n,
+        "lunch": lunch_n, "dinner": dinner_n, "solo": solo_n, "staple": staple_n,
         "bfst_skip": bfst_skip, "lunch_skip": lunch_skip,
         "bfst_custom_ings": bfst_custom_ings, "lunch_custom_ings": lunch_custom_ings,
-        "staple_ings": staple_ings, "snapshot": snapshot, "rids": rids,
+        "staple_ings": staple_ings, "solo_ings": solo_ings,
+        "snapshot": snapshot, "rids": rids,
         # Carried in the result so save_daily_log() records the fruit that this
         # total was actually computed from. Reading the widgets again at save
         # time let a fruit changed after 计算 land in the log while its calories
@@ -1445,8 +1459,8 @@ def get_pdf_nutrition_dict() -> dict:
         "breakfast_protein": fd["bfst"]["protein"] + fd["lunch"]["protein"] + fd["fruit"]["protein"],
         "lunch_kcal":        0,   # combined into breakfast row in PDF layout
         "lunch_protein":     0,
-        "dinner_kcal":       fd["dinner"]["kcal"]   + fd["staple"]["kcal"],
-        "dinner_protein":    fd["dinner"]["protein"] + fd["staple"]["protein"],
+        "dinner_kcal":       fd["dinner"]["kcal"]    + fd["solo"]["kcal"]    + fd["staple"]["kcal"],
+        "dinner_protein":    fd["dinner"]["protein"] + fd["solo"]["protein"] + fd["staple"]["protein"],
         "total_kcal":        t["kcal"],
         "total_protein":     t["protein"],
         "total_fat":         t["fat"],
@@ -1525,11 +1539,17 @@ def _tab_fullday() -> None:
     with st.expander("➕ 临时加菜 (Add-ons)", expanded=False):
         st.caption("今晚临时往锅里加的配菜（如酸菜鱼里的莴笋片、打个鸡蛋等）。填写 **总克数**，计算时会自动同菜谱一起 ÷ 2 算作每人份。")
         st.text_area(
-            "每行 `食材名  数量  单位`", 
-            height=80, 
+            "① 两人共用（填总克数，会 ÷2）",
+            height=80,
             key="fd_dinner_addons_txt",
-            label_visibility="collapsed",
             placeholder="莴笋 150 g\n金针菇 100 g\n午餐肉 50 g"
+        )
+        st.caption("🍽️ 今天在外面吃、或某样只有你吃 → 用下面这栏，填**你自己吃的量**，不会再 ÷2。")
+        st.text_area(
+            "② 外食 / 只有我吃的（不除以 2）",
+            height=80,
+            key="fd_dinner_solo_txt",
+            placeholder="牛肉面 500 g\n煎饺 6 个"
         )
 
     # ── Dinner staple ─────────────────────────────────────────
@@ -2078,9 +2098,12 @@ def _day_editor(default_date, logs_by_date: dict) -> None:
                           format_func=lambda i: by_id[i]["name"],
                           key=f"{K}rids", label_visibility="collapsed",
                           placeholder="选当天做的菜…")
-    addon_txt = st.text_area("其它/临时加菜（填**总克数**，会 ÷2 算每人份）", value="",
+    addon_txt = st.text_area("① 两人共用的临时加菜 —— 填**总克数**，会 ÷2", value="",
                              height=70, key=f"{K}addon",
                              placeholder="莴笋 150 g\n金针菇 100 g")
+    solo_txt = st.text_area("② 🍽️ 外食 / 只有我吃的 —— 填**自己吃的量**，不除以 2",
+                            value="", height=70, key=f"{K}solo",
+                            placeholder="牛肉面 500 g\n煎饺 6 个")
 
     st.markdown("**🍚 主食（每人）**")
     stored_staple = json.loads(log.get("dinner_staple") or "[]")
@@ -2109,6 +2132,7 @@ def _day_editor(default_date, logs_by_date: dict) -> None:
             lunch_skip=ln_skip, lunch_custom_ings=ln_custom,
             fruits=fruits, fruit_g=int(fruit_g), rids=rids,
             addon_ings=_parse_placeholder(addon_txt) if addon_txt.strip() else [],
+            solo_ings=_parse_placeholder(solo_txt) if solo_txt.strip() else [],
             staple_ings=staple_ings,
         )
         save_daily_log(
